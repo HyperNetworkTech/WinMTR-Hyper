@@ -36,9 +36,12 @@ export module WinMTR.Net:ClassDef;
 import <optional>;
 import <atomic>;
 import <array>;
+import <condition_variable>;
+import <deque>;
 import <mutex>;
 import <memory>;
 import <stop_token>;
+import <thread>;
 import <vector>;
 import <string>;
 import <string_view>;
@@ -98,8 +101,9 @@ public:
 			//AfxMessageBox(IDP_SOCKETS_INIT_FAILED);
 			return;
 		}
+		startMetadataWorkers();
 	}
-	~WinMTRNet() noexcept = default;
+	~WinMTRNet() noexcept;
 
 
 	// Synchronous trace scheduler.  The dialog owns the background std::jthread
@@ -166,12 +170,31 @@ private:
 		std::wstring country;
 		std::wstring asn;
 		std::wstring isp;
+		std::wstring source;
+		std::wstring failure_reason;
 		bool hostname_queried = false;
 		bool network_queried = false;
 		std::uint64_t cached_at_tick = 0;
+		std::uint64_t hostname_cached_at_tick = 0;
+		std::uint64_t network_cached_at_tick = 0;
+	};
+	struct metadata_job final {
+		SOCKADDR_INET address = {};
+		std::wstring address_key;
+		std::wstring lookup_token;
+		std::uint64_t expected_session = 0;
+		std::uint64_t expected_epoch = 0;
+		bool resolve_hostname = false;
+		bool lookup_asn_isp = false;
+		std::stop_token cancellation;
 	};
 	std::unordered_map<std::wstring, responder_metadata> responder_lookup_cache;
 	std::unordered_set<std::wstring> reverse_dns_inflight;
+	std::stop_source metadata_session_stop;
+	std::mutex metadata_queue_mutex;
+	std::condition_variable_any metadata_queue_changed;
+	std::deque<metadata_job> metadata_jobs;
+	std::vector<std::jthread> metadata_workers;
 
 	void beginSession(const SOCKADDR_INET& address, std::wstring target,
 		const WinMTRTraceOptions& trace_options);
@@ -199,4 +222,11 @@ private:
 	void scheduleReverseLookup(const SOCKADDR_INET& address,
 		std::uint64_t expected_session, std::uint64_t expected_epoch,
 		bool resolve_hostname, bool lookup_asn_isp);
+	void startMetadataWorkers();
+	void metadataWorkerLoop(std::stop_token stop_token) noexcept;
+	void executeMetadataJob(metadata_job job) noexcept;
+	[[nodiscard]] static bool hostnameCacheFresh(const responder_metadata& metadata,
+		std::uint64_t now) noexcept;
+	[[nodiscard]] static bool networkCacheFresh(const responder_metadata& metadata,
+		std::uint64_t now) noexcept;
 };

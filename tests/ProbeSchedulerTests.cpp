@@ -1,4 +1,5 @@
 #include "WinMTRProbeScheduler.h"
+#include "WinMTRJson.h"
 
 #include <cmath>
 #include <cstdint>
@@ -220,6 +221,35 @@ void test_start_stop_late_completion_race_10_000_times()
 	}
 }
 
+void test_json_string_parser_boundaries()
+{
+	const auto escapedKey = winmtr::json::get_string(
+		R"({"\u0069p":"203.0.113.7"})", "ip");
+	require(escapedKey && *escapedKey == "203.0.113.7",
+		"escaped JSON object key was not decoded");
+	const auto surrogatePair = winmtr::json::get_string(
+		R"({"city":"\uD83D\uDE00"})", "city");
+	require(surrogatePair && *surrogatePair == "\xF0\x9F\x98\x80",
+		"JSON surrogate pair was not combined into UTF-8");
+	require(!winmtr::json::get_string(R"({"ip":"a","ip":"b"})", "ip"),
+		"duplicate JSON key was accepted");
+	require(!winmtr::json::get_string(R"({"ip":null})", "ip"),
+		"JSON null was treated as a string");
+	require(!winmtr::json::get_string(R"({"city":"\uDE00"})", "city"),
+		"unpaired low surrogate was accepted");
+
+	std::string deep = R"({"value":)";
+	deep.append(65, '[');
+	deep += R"("x")";
+	deep.append(65, ']');
+	deep.push_back('}');
+	require(!winmtr::json::get_string(deep, "value"),
+		"over-deep JSON input was accepted");
+	std::string oversized(1024u * 1024u + 1u, ' ');
+	require(!winmtr::json::get_string(oversized, "value"),
+		"oversized JSON input was accepted");
+}
+
 } // namespace
 
 int main()
@@ -232,6 +262,7 @@ int main()
 		test_scheduler_lateness_is_observable();
 		test_restart_epoch_race_10_000_times();
 		test_start_stop_late_completion_race_10_000_times();
+		test_json_string_parser_boundaries();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;
 	}

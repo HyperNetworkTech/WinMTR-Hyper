@@ -448,6 +448,70 @@ void CALLBACK probe_work_callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK
 
 } // namespace
 
+WinMTRNet::~WinMTRNet() noexcept
+{
+	metadata_session_stop.request_stop();
+	for (auto& worker : metadata_workers) worker.request_stop();
+	metadata_queue_changed.notify_all();
+	metadata_workers.clear();
+}
+
+void WinMTRNet::startMetadataWorkers()
+{
+	metadata_workers.reserve(WinMTRUtils::METADATA_WORKER_COUNT);
+	for (unsigned index = 0; index < WinMTRUtils::METADATA_WORKER_COUNT; ++index) {
+		metadata_workers.emplace_back([this](std::stop_token stop_token) {
+			metadataWorkerLoop(stop_token);
+		});
+	}
+}
+
+void WinMTRNet::metadataWorkerLoop(std::stop_token stop_token) noexcept
+{
+	while (!stop_token.stop_requested()) {
+		metadata_job job;
+		{
+			std::unique_lock lock(metadata_queue_mutex);
+			if (!metadata_queue_changed.wait(lock, stop_token,
+				[this] { return !metadata_jobs.empty(); })) {
+				return;
+			}
+			job = std::move(metadata_jobs.front());
+			metadata_jobs.pop_front();
+		}
+		if (job.cancellation.stop_requested()) {
+			std::scoped_lock lock(ghMutex);
+			reverse_dns_inflight.erase(job.lookup_token);
+			continue;
+		}
+		executeMetadataJob(std::move(job));
+	}
+}
+
+bool WinMTRNet::hostnameCacheFresh(const responder_metadata& metadata,
+	std::uint64_t now) noexcept
+{
+	if (!metadata.hostname_queried || metadata.hostname_cached_at_tick == 0
+		|| now < metadata.hostname_cached_at_tick) return false;
+	const auto lifetime = static_cast<std::uint64_t>(metadata.name.empty()
+		? WinMTRUtils::RESPONDER_METADATA_NEGATIVE_CACHE_SECONDS
+		: WinMTRUtils::RESPONDER_METADATA_CACHE_SECONDS) * 1000ull;
+	return now - metadata.hostname_cached_at_tick <= lifetime;
+}
+
+bool WinMTRNet::networkCacheFresh(const responder_metadata& metadata,
+	std::uint64_t now) noexcept
+{
+	if (!metadata.network_queried || metadata.network_cached_at_tick == 0
+		|| now < metadata.network_cached_at_tick) return false;
+	const auto has_network_metadata = !metadata.country.empty() || !metadata.asn.empty()
+		|| !metadata.isp.empty();
+	const auto lifetime = static_cast<std::uint64_t>(has_network_metadata
+		? WinMTRUtils::RESPONDER_METADATA_CACHE_SECONDS
+		: WinMTRUtils::RESPONDER_METADATA_NEGATIVE_CACHE_SECONDS) * 1000ull;
+	return now - metadata.network_cached_at_tick <= lifetime;
+}
+
 WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET address,
 	std::wstring target, bool stop_after_unreached_first_round)
 {
@@ -795,6 +859,13 @@ void WinMTRNet::beginSession(const SOCKADDR_INET& address, std::wstring target,
 	const WinMTRTraceOptions& trace_options)
 {
 	std::scoped_lock lock(ghMutex);
+	metadata_session_stop.request_stop();
+	metadata_session_stop = std::stop_source{};
+	{
+		std::scoped_lock queue_lock(metadata_queue_mutex);
+		metadata_jobs.clear();
+	}
+	reverse_dns_inflight.clear();
 	session_id.fetch_add(1, std::memory_order_acq_rel);
 	data_epoch.fetch_add(1, std::memory_order_acq_rel);
 	last_remote_addr = address;
@@ -827,6 +898,13 @@ void WinMTRNet::finishSession(std::uint64_t expected_session) noexcept
 void WinMTRNet::ResetHops() noexcept
 {
 	std::scoped_lock lock(ghMutex);
+	metadata_session_stop.request_stop();
+	metadata_session_stop = std::stop_source{};
+	{
+		std::scoped_lock queue_lock(metadata_queue_mutex);
+		metadata_jobs.clear();
+	}
+	reverse_dns_inflight.clear();
 	data_epoch.fetch_add(1, std::memory_order_acq_rel);
 	display_max_ttl = 0;
 	reply_sequence = 0;
@@ -990,24 +1068,26 @@ void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 		const auto address_key = addr_to_string(responder);
 		auto cached = responder_lookup_cache.find(address_key);
 		const auto now = GetTickCount64();
-		const auto cacheLifetime = static_cast<std::uint64_t>(
-			WinMTRUtils::RESPONDER_METADATA_CACHE_SECONDS) * 1000ull;
-		if (cached != responder_lookup_cache.end()
-			&& (cached->second.cached_at_tick == 0 || now < cached->second.cached_at_tick
-				|| now - cached->second.cached_at_tick > cacheLifetime)) {
-			responder_lookup_cache.erase(cached);
-			cached = responder_lookup_cache.end();
-		}
 		if (cached != responder_lookup_cache.end()) {
-			const std::wstring displayed_name = resolve_hostname ? cached->second.name : L"";
-			const std::wstring displayed_country = lookup_asn_isp ? cached->second.country : L"";
-			const std::wstring displayed_asn = lookup_asn_isp ? cached->second.asn : L"";
-			const std::wstring displayed_isp = lookup_asn_isp ? cached->second.isp : L"";
-			observed.name = displayed_name;
+			const auto hostname_fresh = hostnameCacheFresh(cached->second, now);
+			const auto network_fresh = networkCacheFresh(cached->second, now);
+			const std::wstring displayed_name = resolve_hostname && hostname_fresh
+				? cached->second.name : L"";
+			const std::wstring displayed_country = lookup_asn_isp && network_fresh
+				? cached->second.country : L"";
+			const std::wstring displayed_asn = lookup_asn_isp && network_fresh
+				? cached->second.asn : L"";
+			const std::wstring displayed_isp = lookup_asn_isp && network_fresh
+				? cached->second.isp : L"";
+			const std::wstring displayed_source = lookup_asn_isp && network_fresh
+				? cached->second.source : L"";
+			const std::wstring displayed_failure = lookup_asn_isp && network_fresh
+				? cached->second.failure_reason : L"";
+			if (!displayed_name.empty()) observed.name = displayed_name;
 			hop.updateResponder(responder, displayed_name, displayed_country,
-				displayed_asn, displayed_isp);
-			needs_reverse_lookup = (resolve_hostname && !cached->second.hostname_queried)
-				|| (lookup_asn_isp && !cached->second.network_queried);
+				displayed_asn, displayed_isp, displayed_source, displayed_failure);
+			needs_reverse_lookup = (resolve_hostname && !hostname_fresh)
+				|| (lookup_asn_isp && !network_fresh);
 		}
 		else {
 			needs_reverse_lookup = resolve_hostname || lookup_asn_isp;
@@ -1031,6 +1111,7 @@ void WinMTRNet::scheduleReverseLookup(const SOCKADDR_INET& address,
 	}
 	const auto lookup_token = std::to_wstring(expected_session) + L":"
 		+ std::to_wstring(expected_epoch) + L":" + address_key;
+	std::stop_token cancellation;
 	{
 		std::scoped_lock lock(ghMutex);
 		if (session_id.load(std::memory_order_relaxed) != expected_session
@@ -1039,57 +1120,87 @@ void WinMTRNet::scheduleReverseLookup(const SOCKADDR_INET& address,
 		}
 		auto cached = responder_lookup_cache.find(address_key);
 		const auto now = GetTickCount64();
-		const auto cacheLifetime = static_cast<std::uint64_t>(
-			WinMTRUtils::RESPONDER_METADATA_CACHE_SECONDS) * 1000ull;
-		if (cached != responder_lookup_cache.end()
-			&& (cached->second.cached_at_tick == 0 || now < cached->second.cached_at_tick
-				|| now - cached->second.cached_at_tick > cacheLifetime)) {
-			responder_lookup_cache.erase(cached);
-			cached = responder_lookup_cache.end();
-		}
 		if (cached != responder_lookup_cache.end()) {
-			const std::wstring displayed_name = resolve_hostname ? cached->second.name : L"";
-			const std::wstring displayed_country = lookup_asn_isp ? cached->second.country : L"";
-			const std::wstring displayed_asn = lookup_asn_isp ? cached->second.asn : L"";
-			const std::wstring displayed_isp = lookup_asn_isp ? cached->second.isp : L"";
+			const auto hostname_fresh = hostnameCacheFresh(cached->second, now);
+			const auto network_fresh = networkCacheFresh(cached->second, now);
+			const std::wstring displayed_name = resolve_hostname && hostname_fresh
+				? cached->second.name : L"";
+			const std::wstring displayed_country = lookup_asn_isp && network_fresh
+				? cached->second.country : L"";
+			const std::wstring displayed_asn = lookup_asn_isp && network_fresh
+				? cached->second.asn : L"";
+			const std::wstring displayed_isp = lookup_asn_isp && network_fresh
+				? cached->second.isp : L"";
+			const std::wstring displayed_source = lookup_asn_isp && network_fresh
+				? cached->second.source : L"";
+			const std::wstring displayed_failure = lookup_asn_isp && network_fresh
+				? cached->second.failure_reason : L"";
 			for (auto& hop : host) {
 				hop.updateResponder(address, displayed_name, displayed_country,
-					displayed_asn, displayed_isp);
+					displayed_asn, displayed_isp, displayed_source, displayed_failure);
 			}
-			if ((!resolve_hostname || cached->second.hostname_queried)
-				&& (!lookup_asn_isp || cached->second.network_queried)) {
+			if ((!resolve_hostname || hostname_fresh)
+				&& (!lookup_asn_isp || network_fresh)) {
 				return;
 			}
 		}
 		if (!reverse_dns_inflight.insert(lookup_token).second) {
 			return;
 		}
+		cancellation = metadata_session_stop.get_token();
 	}
 
-	auto self = weak_from_this().lock();
-	if (!self) {
+	bool queued = false;
+	{
+		std::scoped_lock lock(metadata_queue_mutex);
+		if (metadata_jobs.size() < WinMTRUtils::MAX_PENDING_METADATA_JOBS) {
+			metadata_jobs.push_back(metadata_job{
+				.address = address,
+				.address_key = address_key,
+				.lookup_token = lookup_token,
+				.expected_session = expected_session,
+				.expected_epoch = expected_epoch,
+				.resolve_hostname = resolve_hostname,
+				.lookup_asn_isp = lookup_asn_isp,
+				.cancellation = cancellation,
+			});
+			queued = true;
+		}
+	}
+	if (!queued) {
 		std::scoped_lock lock(ghMutex);
 		reverse_dns_inflight.erase(lookup_token);
 		return;
 	}
-	std::thread([self = std::move(self), address, address_key, lookup_token,
-		expected_session, expected_epoch, resolve_hostname, lookup_asn_isp]() mutable {
+	metadata_queue_changed.notify_one();
+}
+
+void WinMTRNet::executeMetadataJob(metadata_job job) noexcept
+{
+	try {
 		wchar_t buffer[NI_MAXHOST] = {};
 		responder_metadata metadata;
-		metadata.hostname_queried = resolve_hostname;
-		metadata.network_queried = lookup_asn_isp;
+		metadata.hostname_queried = job.resolve_hostname;
+		metadata.network_queried = job.lookup_asn_isp;
 		metadata.cached_at_tick = GetTickCount64();
-		if (lookup_asn_isp && winmtr::network_data::isPublicAddress(address_key)) {
-			const auto network_data = winmtr::network_data::queryAddress(address_key, {}, resolve_hostname);
+		metadata.hostname_cached_at_tick = job.resolve_hostname ? metadata.cached_at_tick : 0;
+		metadata.network_cached_at_tick = job.lookup_asn_isp ? metadata.cached_at_tick : 0;
+		if (job.lookup_asn_isp && !job.cancellation.stop_requested()
+			&& winmtr::network_data::isPublicAddress(job.address_key)) {
+			const auto network_data = winmtr::network_data::queryAddress(job.address_key,
+				job.cancellation, job.resolve_hostname);
 			metadata.country = network_data.country;
 			metadata.asn = network_data.asn;
 			metadata.isp = network_data.isp;
-			if (resolve_hostname) {
+			metadata.source = network_data.source;
+			metadata.failure_reason = network_data.failureReason;
+			if (job.resolve_hostname) {
 				metadata.name = network_data.hostname;
 			}
 		}
-		if (resolve_hostname && metadata.name.empty()) {
-			auto local_address = address;
+		if (job.resolve_hostname && metadata.name.empty()
+			&& !job.cancellation.stop_requested()) {
+			auto local_address = job.address;
 			if (GetNameInfoW(reinterpret_cast<const sockaddr*>(&local_address),
 				static_cast<socklen_t>(getAddressSize(local_address)),
 				buffer, static_cast<DWORD>(std::size(buffer)), nullptr, 0,
@@ -1098,48 +1209,67 @@ void WinMTRNet::scheduleReverseLookup(const SOCKADDR_INET& address,
 			}
 		}
 
-		std::scoped_lock lock(self->ghMutex);
-		self->reverse_dns_inflight.erase(lookup_token);
-		if (self->session_id.load(std::memory_order_relaxed) != expected_session
-			|| self->data_epoch.load(std::memory_order_relaxed) != expected_epoch) {
+		std::scoped_lock lock(ghMutex);
+		reverse_dns_inflight.erase(job.lookup_token);
+		if (job.cancellation.stop_requested()
+			|| session_id.load(std::memory_order_relaxed) != job.expected_session
+			|| data_epoch.load(std::memory_order_relaxed) != job.expected_epoch) {
 			return;
 		}
-		if (const auto previous = self->responder_lookup_cache.find(address_key);
-			previous != self->responder_lookup_cache.end()) {
+		if (const auto previous = responder_lookup_cache.find(job.address_key);
+			previous != responder_lookup_cache.end()) {
 			if (metadata.name.empty()) metadata.name = previous->second.name;
 			if (metadata.country.empty()) metadata.country = previous->second.country;
 			if (metadata.asn.empty()) metadata.asn = previous->second.asn;
 			if (metadata.isp.empty()) metadata.isp = previous->second.isp;
+			if (metadata.source.empty()) metadata.source = previous->second.source;
+			if (metadata.failure_reason.empty()) {
+				metadata.failure_reason = previous->second.failure_reason;
+			}
 			metadata.hostname_queried = metadata.hostname_queried || previous->second.hostname_queried;
 			metadata.network_queried = metadata.network_queried || previous->second.network_queried;
-		}
-		if (!self->responder_lookup_cache.contains(address_key)
-			&& self->responder_lookup_cache.size()
-				>= WinMTRUtils::MAX_RESPONDER_METADATA_CACHE_ENTRIES) {
-			const auto oldest = std::min_element(self->responder_lookup_cache.begin(),
-				self->responder_lookup_cache.end(), [](const auto& lhs, const auto& rhs) {
-					return lhs.second.cached_at_tick < rhs.second.cached_at_tick;
-				});
-			if (oldest != self->responder_lookup_cache.end()) {
-				self->responder_lookup_cache.erase(oldest);
+			if (!job.resolve_hostname) {
+				metadata.hostname_cached_at_tick = previous->second.hostname_cached_at_tick;
+			}
+			if (!job.lookup_asn_isp) {
+				metadata.network_cached_at_tick = previous->second.network_cached_at_tick;
 			}
 		}
-		self->responder_lookup_cache[address_key] = metadata;
+		if (!responder_lookup_cache.contains(job.address_key)
+			&& responder_lookup_cache.size()
+				>= WinMTRUtils::MAX_RESPONDER_METADATA_CACHE_ENTRIES) {
+			const auto oldest = std::min_element(responder_lookup_cache.begin(),
+				responder_lookup_cache.end(), [](const auto& lhs, const auto& rhs) {
+					return lhs.second.cached_at_tick < rhs.second.cached_at_tick;
+				});
+			if (oldest != responder_lookup_cache.end()) {
+				responder_lookup_cache.erase(oldest);
+			}
+		}
+		responder_lookup_cache[job.address_key] = metadata;
 		if (metadata.name.empty() && metadata.country.empty()
-			&& metadata.asn.empty() && metadata.isp.empty()) {
+			&& metadata.asn.empty() && metadata.isp.empty()
+			&& metadata.source.empty() && metadata.failure_reason.empty()) {
 			return;
 		}
 		bool updated = false;
-		const std::wstring displayed_name = resolve_hostname ? metadata.name : L"";
-		const std::wstring displayed_country = lookup_asn_isp ? metadata.country : L"";
-		const std::wstring displayed_asn = lookup_asn_isp ? metadata.asn : L"";
-		const std::wstring displayed_isp = lookup_asn_isp ? metadata.isp : L"";
-		for (auto& hop : self->host) {
-			updated = hop.updateResponder(address, displayed_name, displayed_country,
-				displayed_asn, displayed_isp) || updated;
+		const std::wstring displayed_name = job.resolve_hostname ? metadata.name : L"";
+		const std::wstring displayed_country = job.lookup_asn_isp ? metadata.country : L"";
+		const std::wstring displayed_asn = job.lookup_asn_isp ? metadata.asn : L"";
+		const std::wstring displayed_isp = job.lookup_asn_isp ? metadata.isp : L"";
+		const std::wstring displayed_source = job.lookup_asn_isp ? metadata.source : L"";
+		const std::wstring displayed_failure = job.lookup_asn_isp
+			? metadata.failure_reason : L"";
+		for (auto& hop : host) {
+			updated = hop.updateResponder(job.address, displayed_name, displayed_country,
+				displayed_asn, displayed_isp, displayed_source, displayed_failure) || updated;
 		}
-		if (updated) ++self->data_revision;
-	}).detach();
+		if (updated) ++data_revision;
+	}
+	catch (...) {
+		std::scoped_lock lock(ghMutex);
+		reverse_dns_inflight.erase(job.lookup_token);
+	}
 }
 
 bool WinMTRNet::updateResponderMetadata(std::uint64_t expected_session,

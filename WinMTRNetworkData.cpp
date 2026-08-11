@@ -5,23 +5,32 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <Windows.h>
+#include <VersionHelpers.h>
 #include <WinDNS.h>
 #include <WinHTTP.h>
 #include <Iphlpapi.h>
 
 #include "WinMTRNetworkData.h"
 #include "WinMTRBranding.h"
+#include "WinMTRJson.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cctype>
 #include <cstdint>
 #include <cwctype>
+#include <functional>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string_view>
+#include <thread>
+#include <unordered_map>
 #include <utility>
 
 #pragma comment(lib, "winhttp.lib")
@@ -41,6 +50,92 @@ struct InternetCloser final {
 	}
 };
 using InternetHandle = std::unique_ptr<void, InternetCloser>;
+
+struct CancelableInternetState final {
+	explicit CancelableInternetState(void* initial) noexcept : value(initial) {}
+	~CancelableInternetState() noexcept { close(); }
+	void close() noexcept
+	{
+		if (void* handle = value.exchange(nullptr, std::memory_order_acq_rel)) {
+			WinHttpCloseHandle(handle);
+		}
+	}
+	std::atomic<void*> value = nullptr;
+};
+
+class CancelableInternetHandle final {
+public:
+	explicit CancelableInternetHandle(void* value)
+		: state_(std::make_shared<CancelableInternetState>(value)) {}
+	[[nodiscard]] void* get() const noexcept
+	{
+		return state_->value.load(std::memory_order_acquire);
+	}
+	[[nodiscard]] explicit operator bool() const noexcept { return get() != nullptr; }
+	[[nodiscard]] std::shared_ptr<CancelableInternetState> state() const noexcept
+	{
+		return state_;
+	}
+private:
+	std::shared_ptr<CancelableInternetState> state_;
+};
+
+struct ProviderHealth final {
+	unsigned consecutiveFailures = 0;
+	std::uint64_t retryAfterTick = 0;
+};
+
+std::mutex providerHealthMutex;
+std::unordered_map<std::wstring, ProviderHealth> providerHealth;
+
+[[nodiscard]] bool providerAvailable(std::wstring_view provider)
+{
+	const auto now = GetTickCount64();
+	std::scoped_lock lock(providerHealthMutex);
+	const auto found = providerHealth.find(std::wstring(provider));
+	return found == providerHealth.end() || found->second.retryAfterTick == 0
+		|| now >= found->second.retryAfterTick;
+}
+
+void recordProviderResult(std::wstring_view provider, bool success)
+{
+	std::scoped_lock lock(providerHealthMutex);
+	auto& health = providerHealth[std::wstring(provider)];
+	if (success) {
+		health = {};
+		return;
+	}
+	health.consecutiveFailures = std::min(health.consecutiveFailures + 1u, 10u);
+	const auto exponent = std::min(health.consecutiveFailures - 1u, 8u);
+	const auto baseDelayMs = std::min<std::uint64_t>(300'000ull, 1'000ull << exponent);
+	const auto jitterMs = std::hash<std::wstring_view>{}(provider) % 251u;
+	health.retryAfterTick = GetTickCount64() + baseDelayMs + jitterMs;
+}
+
+class QueryBudget final {
+public:
+	QueryBudget(std::stop_token parent, std::chrono::milliseconds duration)
+		: forwardParent_(parent, [this] { cancellation_.request_stop(); }),
+		  timer_([this, duration](std::stop_token timerStop) {
+			  std::mutex mutex;
+			  std::condition_variable_any changed;
+			  std::unique_lock lock(mutex);
+			  (void)changed.wait_for(lock, timerStop, duration, [] { return false; });
+			  if (!timerStop.stop_requested()) cancellation_.request_stop();
+		  })
+	{
+	}
+
+	[[nodiscard]] std::stop_token token() const noexcept
+	{
+		return cancellation_.get_token();
+	}
+
+private:
+	std::stop_source cancellation_;
+	std::stop_callback<std::function<void()>> forwardParent_;
+	std::jthread timer_;
+};
 
 struct DnsRecordCloser final {
 	void operator()(DNS_RECORDW* value) const noexcept
@@ -84,76 +179,9 @@ using DnsRecordList = std::unique_ptr<DNS_RECORDW, DnsRecordCloser>;
 	return result;
 }
 
-void appendUtf8(std::string& out, unsigned codePoint)
-{
-	if (codePoint <= 0x7f) {
-		out.push_back(static_cast<char>(codePoint));
-	}
-	else if (codePoint <= 0x7ff) {
-		out.push_back(static_cast<char>(0xc0 | (codePoint >> 6)));
-		out.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-	}
-	else {
-		out.push_back(static_cast<char>(0xe0 | (codePoint >> 12)));
-		out.push_back(static_cast<char>(0x80 | ((codePoint >> 6) & 0x3f)));
-		out.push_back(static_cast<char>(0x80 | (codePoint & 0x3f)));
-	}
-}
-
 [[nodiscard]] std::optional<std::string> jsonString(std::string_view json, std::string_view key)
 {
-	const std::string marker = "\"" + std::string(key) + "\"";
-	auto at = json.find(marker);
-	if (at == std::string_view::npos) {
-		return std::nullopt;
-	}
-	at = json.find(':', at + marker.size());
-	if (at == std::string_view::npos) {
-		return std::nullopt;
-	}
-	while (++at < json.size() && std::isspace(static_cast<unsigned char>(json[at])) != 0) {}
-	if (at >= json.size() || json[at] != '"') {
-		return std::nullopt;
-	}
-	std::string result;
-	for (++at; at < json.size(); ++at) {
-		const char ch = json[at];
-		if (ch == '"') {
-			return result;
-		}
-		if (ch != '\\' || ++at >= json.size()) {
-			result.push_back(ch);
-			continue;
-		}
-		switch (json[at]) {
-		case '"': result.push_back('"'); break;
-		case '\\': result.push_back('\\'); break;
-		case '/': result.push_back('/'); break;
-		case 'b': result.push_back('\b'); break;
-		case 'f': result.push_back('\f'); break;
-		case 'n': result.push_back('\n'); break;
-		case 'r': result.push_back('\r'); break;
-		case 't': result.push_back('\t'); break;
-		case 'u': {
-			if (at + 4 >= json.size()) {
-				return std::nullopt;
-			}
-			unsigned value = 0;
-			for (int index = 0; index < 4; ++index) {
-				const char digit = json[++at];
-				value <<= 4;
-				if (digit >= '0' && digit <= '9') value += static_cast<unsigned>(digit - '0');
-				else if (digit >= 'a' && digit <= 'f') value += static_cast<unsigned>(digit - 'a' + 10);
-				else if (digit >= 'A' && digit <= 'F') value += static_cast<unsigned>(digit - 'A' + 10);
-				else return std::nullopt;
-			}
-			appendUtf8(result, value);
-			break;
-		}
-		default: result.push_back(json[at]); break;
-		}
-	}
-	return std::nullopt;
+	return winmtr::json::get_string(json, key);
 }
 
 [[nodiscard]] std::wstring trim(std::wstring value)
@@ -184,46 +212,60 @@ void addUnique(std::vector<std::wstring>& values, std::wstring value)
 [[nodiscard]] std::optional<std::string> httpGet(std::wstring_view host, std::wstring_view path,
 	std::stop_token stopToken)
 {
-	if (stopToken.stop_requested()) return std::nullopt;
+	if (stopToken.stop_requested() || !providerAvailable(host)) return std::nullopt;
+	const auto failed = [host]() -> std::optional<std::string> {
+		recordProviderResult(host, false);
+		return std::nullopt;
+	};
 	InternetHandle session{ WinHttpOpen(WinMTRBranding::http_user_agent.data(), WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
 		WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0) };
-	if (!session) return std::nullopt;
+	if (!session) return failed();
 	WinHttpSetTimeouts(session.get(), 3000, 3000, 3000, 3500);
-	DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_1 |
-		WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
-	WinHttpSetOption(session.get(), WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+	if (!IsWindows10OrGreater()) {
+		DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+		if (!WinHttpSetOption(session.get(), WINHTTP_OPTION_SECURE_PROTOCOLS,
+			&protocols, sizeof(protocols))) return failed();
+	}
 
 	InternetHandle connection{ WinHttpConnect(session.get(), std::wstring(host).c_str(),
 		INTERNET_DEFAULT_HTTPS_PORT, 0) };
-	if (!connection || stopToken.stop_requested()) return std::nullopt;
-	InternetHandle request{ WinHttpOpenRequest(connection.get(), L"GET", std::wstring(path).c_str(),
+	if (!connection || stopToken.stop_requested()) return failed();
+	CancelableInternetHandle request{ WinHttpOpenRequest(connection.get(), L"GET", std::wstring(path).c_str(),
 		nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
 		WINHTTP_FLAG_SECURE | WINHTTP_FLAG_REFRESH) };
-	if (!request) return std::nullopt;
+	if (!request) return failed();
+	std::stop_callback cancelRequest(stopToken,
+		[state = request.state()] { state->close(); });
+	if (stopToken.stop_requested()) return std::nullopt;
 	const wchar_t headers[] = L"Accept: application/json, text/plain;q=0.9\r\nAccept-Encoding: identity\r\n";
 	if (!WinHttpSendRequest(request.get(), headers, static_cast<DWORD>(-1L), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
 		!WinHttpReceiveResponse(request.get(), nullptr)) {
-		return std::nullopt;
+		return stopToken.stop_requested() ? std::nullopt : failed();
 	}
 	DWORD status = 0;
 	DWORD statusSize = sizeof(status);
 	if (!WinHttpQueryHeaders(request.get(), WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
 		WINHTTP_HEADER_NAME_BY_INDEX, &status, &statusSize, WINHTTP_NO_HEADER_INDEX) || status < 200 || status >= 300) {
-		return std::nullopt;
+		return failed();
 	}
 	std::string body;
 	for (;;) {
 		if (stopToken.stop_requested()) return std::nullopt;
 		DWORD available = 0;
-		if (!WinHttpQueryDataAvailable(request.get(), &available)) return std::nullopt;
+		if (!WinHttpQueryDataAvailable(request.get(), &available)) {
+			return stopToken.stop_requested() ? std::nullopt : failed();
+		}
 		if (available == 0) break;
 		const size_t oldSize = body.size();
 		body.resize(oldSize + available);
 		DWORD read = 0;
-		if (!WinHttpReadData(request.get(), body.data() + oldSize, available, &read)) return std::nullopt;
+		if (!WinHttpReadData(request.get(), body.data() + oldSize, available, &read)) {
+			return stopToken.stop_requested() ? std::nullopt : failed();
+		}
 		body.resize(oldSize + read);
-		if (body.size() > 1024 * 1024) return std::nullopt;
+		if (body.size() > 1024 * 1024) return failed();
 	}
+	recordProviderResult(host, true);
 	return body;
 }
 
@@ -407,15 +449,23 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 
 [[nodiscard]] std::pair<std::wstring, std::wstring> queryCymru(const std::wstring& address)
 {
+	const auto providerName = WinMTRBranding::sources::team_cymru_name;
+	if (!providerAvailable(providerName)) return {};
 	const auto origin = cymruOriginName(address);
 	if (origin.empty()) return {};
 	const auto responses = dnsTxt(origin);
-	if (responses.empty()) return {};
+	if (responses.empty()) {
+		recordProviderResult(providerName, false);
+		return {};
+	}
 	auto first = responses.front();
 	auto delimiter = first.find(L'|');
 	std::wstring asn = trim(first.substr(0, delimiter));
 	if (asn.size() > 2 && _wcsnicmp(asn.c_str(), L"AS", 2) == 0) asn.erase(0, 2);
-	if (asn.empty()) return {};
+	if (asn.empty()) {
+		recordProviderResult(providerName, false);
+		return {};
+	}
 	const auto names = dnsTxt(L"AS" + asn + std::wstring(WinMTRBranding::sources::team_cymru_asn_suffix));
 	std::wstring provider;
 	if (!names.empty()) {
@@ -423,6 +473,7 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 		auto lastDelimiter = line.rfind(L'|');
 		if (lastDelimiter != std::wstring::npos) provider = trim(line.substr(lastDelimiter + 1));
 	}
+	recordProviderResult(providerName, true);
 	return { asn, provider };
 }
 
@@ -482,6 +533,13 @@ void finalize(IpConnectionInfo& info, std::stop_token stopToken, bool resolveHos
 		}
 	}
 	finalize(selected, stopToken, true);
+	if (selected.source.empty()) {
+		selected.failureReason = L"No provider returned a usable address for the requested family";
+	}
+	else if (selected.source != primaryName) {
+		selected.failureReason = std::wstring(primaryName)
+			+ L" was unavailable or returned an unusable response";
+	}
 	return selected;
 }
 
@@ -600,25 +658,34 @@ bool isPublicAddress(const std::wstring& address) noexcept
 }
 
 IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopToken,
-	bool resolveHostname)
+	bool resolveHostname, bool allowHttpFallback)
 {
 	IpConnectionInfo result;
 	if (!isPublicAddress(address) || stopToken.stop_requested()) return result;
 	SOCKADDR_INET parsed{};
 	(void)parseAddress(address, parsed);
+	const auto [asn, provider] = queryCymru(address);
+	if (!asn.empty()) {
+		result.address = address;
+		result.asn = asn;
+		result.isp = provider;
+		result.source = WinMTRBranding::sources::team_cymru_name;
+	}
 	const auto primaryName = parsed.si_family == AF_INET6
 		? WinMTRBranding::sources::ipinfo_ipv6_name
 		: WinMTRBranding::sources::ipinfo_ipv4_name;
-	if (const auto body = httpGet(primaryName,
-		L"/" + percentEncode(address) + L"/json", stopToken)) {
-		auto candidate = parseIpInfo(*body);
-		if (hasMetadata(candidate)) {
-			candidate.address = address;
-			candidate.source = primaryName;
-			result = std::move(candidate);
+	if (!result.available() && allowHttpFallback) {
+		if (const auto body = httpGet(primaryName,
+			L"/" + percentEncode(address) + L"/json", stopToken)) {
+			auto candidate = parseIpInfo(*body);
+			if (hasMetadata(candidate)) {
+				candidate.address = address;
+				candidate.source = primaryName;
+				result = std::move(candidate);
+			}
 		}
 	}
-	if (!result.available() && !stopToken.stop_requested()) {
+	if (!result.available() && allowHttpFallback && !stopToken.stop_requested()) {
 		if (const auto body = httpGet(WinMTRBranding::sources::ipapi_name,
 			L"/" + percentEncode(address) + L"/json/", stopToken)) {
 			auto candidate = parseIpApi(*body);
@@ -630,13 +697,9 @@ IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopT
 		}
 	}
 	if (!result.available() && !stopToken.stop_requested()) {
-		const auto [asn, provider] = queryCymru(address);
-		result.address = address;
-		if (!asn.empty()) {
-			result.asn = asn;
-			result.isp = provider;
-			result.source = WinMTRBranding::sources::team_cymru_name;
-		}
+		result.failureReason = allowHttpFallback
+			? L"Team Cymru DNS and configured HTTPS providers returned no usable metadata"
+			: L"Team Cymru DNS returned no usable metadata; HTTPS fallback is disabled for hops";
 	}
 	finalize(result, stopToken, resolveHostname);
 	return result;
@@ -645,6 +708,8 @@ IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopT
 CurrentNetworkInfo queryCurrent(std::stop_token stopToken)
 {
 	CurrentNetworkInfo result;
+	QueryBudget budget(stopToken, std::chrono::seconds(8));
+	const auto queryToken = budget.token();
 	WSADATA wsaData{};
 	const bool wsaStarted = WSAStartup(MAKEWORD(2, 2), &wsaData) == 0;
 	struct WsaCleanup final {
@@ -652,16 +717,20 @@ CurrentNetworkInfo queryCurrent(std::stop_token stopToken)
 		~WsaCleanup() { if (active) WSACleanup(); }
 	} cleanup{ wsaStarted };
 
-	result.ipv4 = queryCurrentFamily(AF_INET, stopToken);
-	if (!result.ipv4.source.empty()) addUnique(result.successfulSources, result.ipv4.source);
-	result.ipv6 = queryCurrentFamily(AF_INET6, stopToken);
-	if (!result.ipv6.source.empty()) addUnique(result.successfulSources, result.ipv6.source);
+	std::jthread ipv4Query([&] {
+		try { result.ipv4 = queryCurrentFamily(AF_INET, queryToken); }
+		catch (...) { result.ipv4.failureReason = L"IPv4 provider query failed"; }
+	});
+	std::jthread ipv6Query([&] {
+		try { result.ipv6 = queryCurrentFamily(AF_INET6, queryToken); }
+		catch (...) { result.ipv6.failureReason = L"IPv6 provider query failed"; }
+	});
 
-	if (!stopToken.stop_requested()) {
+	if (!queryToken.stop_requested()) {
 		queryWhoAmI(result.dns, result.successfulSources);
 		result.dns.localServers = localDnsServers();
 		if (isPublicAddress(result.dns.publicAddress)) {
-			auto dnsMetadata = queryAddress(result.dns.publicAddress, stopToken, true);
+			auto dnsMetadata = queryAddress(result.dns.publicAddress, queryToken, true, true);
 			result.dns.hostname = dnsMetadata.hostname;
 			result.dns.city = dnsMetadata.city;
 			result.dns.region = dnsMetadata.region;
@@ -669,8 +738,23 @@ CurrentNetworkInfo queryCurrent(std::stop_token stopToken)
 			result.dns.countryCode = dnsMetadata.countryCode;
 			result.dns.asn = dnsMetadata.asn;
 			result.dns.provider = dnsMetadata.isp;
+			result.dns.metadataSource = dnsMetadata.source;
+			result.dns.failureReason = dnsMetadata.failureReason;
 			if (!dnsMetadata.source.empty()) addUnique(result.successfulSources, dnsMetadata.source);
 		}
+	}
+	if (ipv4Query.joinable()) ipv4Query.join();
+	if (ipv6Query.joinable()) ipv6Query.join();
+	if (!result.ipv4.source.empty()) addUnique(result.successfulSources, result.ipv4.source);
+	if (!result.ipv6.source.empty()) addUnique(result.successfulSources, result.ipv6.source);
+	result.updatedAtUnixMs = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::system_clock::now().time_since_epoch()).count());
+	result.timedOut = queryToken.stop_requested() && !stopToken.stop_requested();
+	if (!result.anyAvailable()) {
+		result.refreshError = result.timedOut
+			? L"The public network information query exceeded its 8-second budget"
+			: L"No configured provider returned usable network information";
 	}
 	result.complete = true;
 	return result;
@@ -692,7 +776,17 @@ std::wstring formatDetails(const CurrentNetworkInfo& info)
 		field(country, value.country);
 		field(asn, value.asn);
 		field(provider, value.isp);
+		field(sources, value.source);
+		if (!value.failureReason.empty()) field(L"失敗原因", value.failureReason);
 	};
+	if (info.updatedAtUnixMs != 0) {
+		field(L"Last updated (Unix ms)", std::to_wstring(info.updatedAtUnixMs));
+	}
+	if (info.refreshing) field(L"狀態", L"更新中（顯示上次成功資料）");
+	else if (info.stale) field(L"狀態", L"更新失敗（顯示上次成功資料）");
+	if (!info.refreshError.empty()) field(L"更新錯誤", info.refreshError);
+	if (info.updatedAtUnixMs != 0 || info.refreshing || info.stale
+		|| !info.refreshError.empty()) out << L"\r\n";
 	section(ipv4_section, info.ipv4);
 	out << L"\r\n";
 	section(ipv6_section, info.ipv6);
@@ -704,6 +798,9 @@ std::wstring formatDetails(const CurrentNetworkInfo& info)
 	field(country, info.dns.country);
 	field(asn, info.dns.asn);
 	field(provider, info.dns.provider);
+	field(sources, info.dns.source);
+	if (!info.dns.metadataSource.empty()) field(L"Metadata source", info.dns.metadataSource);
+	if (!info.dns.failureReason.empty()) field(L"失敗原因", info.dns.failureReason);
 	std::wstring ecsValue;
 	switch (info.dns.ecsSupport) {
 	case EcsSupport::supported:

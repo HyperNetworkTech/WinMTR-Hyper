@@ -68,6 +68,8 @@ export struct s_netresponder final {
 	std::wstring country;
 	std::wstring asn;
 	std::wstring isp;
+	std::wstring metadata_source;
+	std::wstring metadata_failure_reason;
 	std::uint64_t last_seen_sequence = 0;
 	std::uint64_t last_reply_tick = 0;
 	std::uint64_t hit_count = 0;
@@ -101,6 +103,8 @@ export struct s_nethost final {
 	std::wstring country;
 	std::wstring asn;
 	std::wstring isp;
+	std::wstring metadata_source;
+	std::wstring metadata_failure_reason;
 	std::uint64_t xmit = 0;		// probes accepted by the transport (Sent column)
 	std::uint64_t completed = 0;	// received + timed_out; excludes in-flight/local failures
 	std::uint64_t returned = 0;	// completed probes with a usable ICMP reply
@@ -305,6 +309,8 @@ export struct s_nethost final {
 		country = primary.country;
 		asn = primary.asn;
 		isp = primary.isp;
+		metadata_source = primary.metadata_source;
+		metadata_failure_reason = primary.metadata_failure_reason;
 		return primary;
 	}
 
@@ -339,7 +345,9 @@ public:
 		const std::wstring& responder_name,
 		const std::wstring& responder_country = {},
 		const std::wstring& responder_asn = {},
-		const std::wstring& responder_isp = {})
+		const std::wstring& responder_isp = {},
+		const std::wstring& responder_source = {},
+		const std::wstring& responder_failure_reason = {})
 	{
 		for (auto& responder : responders) {
 			if (!same_network_address(responder.addr, responder_address)) {
@@ -357,11 +365,19 @@ public:
 			if (!responder_isp.empty()) {
 				responder.isp = responder_isp;
 			}
+			if (!responder_source.empty()) {
+				responder.metadata_source = responder_source;
+			}
+			if (!responder_failure_reason.empty()) {
+				responder.metadata_failure_reason = responder_failure_reason;
+			}
 			if (&responder == &responders.front()) {
 				name = responder.name;
 				country = responder.country;
 				asn = responder.asn;
 				isp = responder.isp;
+				metadata_source = responder.metadata_source;
+				metadata_failure_reason = responder.metadata_failure_reason;
 			}
 			return true;
 		}

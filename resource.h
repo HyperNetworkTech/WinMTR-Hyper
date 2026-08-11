@@ -200,6 +200,7 @@
 // Current network information dialog controls (1400-1499)
 #define IDC_EDIT_NETWORK_INFO                   1400
 #define IDC_BUTTON_NETWORK_INFO_COPY            1401
+#define IDC_BUTTON_NETWORK_INFO_REFRESH         1402
 
 // Copy/export popup menu commands
 #define ID_EXPORT_COPY_TEXT                     32771

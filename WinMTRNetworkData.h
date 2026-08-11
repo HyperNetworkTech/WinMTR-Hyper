@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <stop_token>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@ struct IpConnectionInfo final {
 	std::wstring asn;
 	std::wstring isp;
 	std::wstring source;
+	std::wstring failureReason;
 
 	[[nodiscard]] bool available() const noexcept { return !address.empty(); }
 };
@@ -39,6 +41,8 @@ struct DnsConnectionInfo final {
 	EcsSupport ecsSupport = EcsSupport::unknown;
 	std::vector<std::wstring> localServers;
 	std::wstring source;
+	std::wstring metadataSource;
+	std::wstring failureReason;
 };
 
 struct CurrentNetworkInfo final {
@@ -46,7 +50,12 @@ struct CurrentNetworkInfo final {
 	IpConnectionInfo ipv6;
 	DnsConnectionInfo dns;
 	std::vector<std::wstring> successfulSources;
+	std::wstring refreshError;
+	std::uint64_t updatedAtUnixMs = 0;
 	bool complete = false;
+	bool timedOut = false;
+	bool refreshing = false;
+	bool stale = false;
 
 	[[nodiscard]] bool anyAvailable() const noexcept
 	{
@@ -58,7 +67,8 @@ struct CurrentNetworkInfo final {
 // std::jthread so Windows 7 does not need the Windows Runtime asynchronous APIs.
 [[nodiscard]] CurrentNetworkInfo queryCurrent(std::stop_token stopToken = {});
 [[nodiscard]] IpConnectionInfo queryAddress(const std::wstring& address,
-	std::stop_token stopToken = {}, bool resolveHostname = true);
+	std::stop_token stopToken = {}, bool resolveHostname = true,
+	bool allowHttpFallback = false);
 [[nodiscard]] std::wstring formatDetails(const CurrentNetworkInfo& info);
 [[nodiscard]] bool isPublicAddress(const std::wstring& address) noexcept;
 

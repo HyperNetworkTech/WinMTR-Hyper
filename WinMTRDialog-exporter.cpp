@@ -336,6 +336,9 @@ struct ExportRow final {
 			<< L"\"country\":\"" << jsonEscape(hop.country) << L"\","
 			<< L"\"asn\":\"" << jsonEscape(hop.asn) << L"\","
 			<< L"\"isp\":\"" << jsonEscape(hop.isp) << L"\","
+			<< L"\"metadata_source\":\"" << jsonEscape(hop.metadata_source) << L"\","
+			<< L"\"metadata_failure_reason\":\""
+			<< jsonEscape(hop.metadata_failure_reason) << L"\","
 			<< L"\"responders\":[";
 		for (size_t responderIndex = 0; responderIndex < hop.responders.size(); ++responderIndex) {
 			const auto& responder = hop.responders[responderIndex];
@@ -348,7 +351,11 @@ struct ExportRow final {
 				<< L"\"ip\":\"" << jsonEscape(addr_to_string(responder.addr)) << L"\","
 				<< L"\"country\":\"" << jsonEscape(responder.country) << L"\","
 				<< L"\"asn\":\"" << jsonEscape(responder.asn) << L"\","
-				<< L"\"isp\":\"" << jsonEscape(responder.isp) << L"\"}";
+				<< L"\"isp\":\"" << jsonEscape(responder.isp) << L"\","
+				<< L"\"metadata_source\":\""
+				<< jsonEscape(responder.metadata_source) << L"\","
+				<< L"\"metadata_failure_reason\":\""
+				<< jsonEscape(responder.metadata_failure_reason) << L"\"}";
 		}
 		out << L"]}";
 	}

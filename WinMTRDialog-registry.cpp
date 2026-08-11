@@ -144,8 +144,29 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 	dontFragment = queryDword(config, L"DontFragment", WinMTRUtils::DEFAULT_DONT_FRAGMENT) != 0;
 	useIPv4 = queryDword(config, L"UseIPv4", WinMTRUtils::DEFAULT_USE_IPV4) != 0;
 	useIPv6 = queryDword(config, L"UseIPv6", WinMTRUtils::DEFAULT_USE_IPV6) != 0;
-	queryPublicInfo = queryDword(config, L"QueryPublicInfo",
-		WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO) != 0;
+	DWORD publicInfoConsentShown = 0;
+	const bool hasPublicInfoConsent = config.QueryDWORDValue(
+		L"PublicInfoConsentShown", publicInfoConsentShown) == ERROR_SUCCESS
+		&& publicInfoConsentShown != 0;
+	if (!hasPublicInfoConsent) {
+		const auto consent = AfxMessageBox(
+			L"目前公網資訊與節點 ASN/業者查詢會連線至 Team Cymru、ipinfo.io "
+			L"與 whoami.ds.akahelp.net；只有主要來源完全無法使用時才會連線備援服務，"
+			L"且不會混合不同 HTTP 來源的欄位。\r\n\r\n是否啟用這些外部查詢？"
+			L"之後可隨時在「選項」中關閉。",
+			MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2);
+		queryPublicInfo = consent == IDYES;
+		config.SetDWORDValue(L"QueryPublicInfo", queryPublicInfo.load() ? 1 : 0);
+		if (consent != IDYES) {
+			lookupAsnIsp = false;
+			config.SetDWORDValue(L"LookupAsnIsp", 0);
+		}
+		config.SetDWORDValue(L"PublicInfoConsentShown", 1);
+	}
+	else {
+		queryPublicInfo = queryDword(config, L"QueryPublicInfo",
+			WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO) != 0;
+	}
 	publicInfoRefreshMode = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMode",
 		WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE),
 		WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE,

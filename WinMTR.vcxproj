@@ -1401,6 +1401,7 @@
     <ClInclude Include="Resource.h" />
     <ClInclude Include="WinMTRBranding.h" />
     <ClInclude Include="WinMTRGlobal.h" />
+    <ClInclude Include="WinMTRJson.h" />
     <ClInclude Include="WinMTRMain.h" />
     <ClInclude Include="WinMTRNetworkData.h" />
     <ClInclude Include="WinMTRProperties.h" />

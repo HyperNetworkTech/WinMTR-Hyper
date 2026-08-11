@@ -78,7 +78,10 @@ export namespace WinMTRUtils {
 	// A bounded 24-hour cache prevents repeated external lookups without
 	// retaining stale network ownership data indefinitely.
 	export constexpr auto RESPONDER_METADATA_CACHE_SECONDS = 86400u;
+	export constexpr auto RESPONDER_METADATA_NEGATIVE_CACHE_SECONDS = 600u;
 	export constexpr auto MAX_RESPONDER_METADATA_CACHE_ENTRIES = 2048u;
+	export constexpr auto METADATA_WORKER_COUNT = 4u;
+	export constexpr auto MAX_PENDING_METADATA_JOBS = 1024u;
 
 	export constexpr auto DEFAULT_USE_DNS = true;
 	export constexpr auto DEFAULT_LOOKUP_ASN_ISP = true;

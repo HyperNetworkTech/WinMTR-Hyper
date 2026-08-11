@@ -337,9 +337,14 @@ protected:
 		const int buttonHeight = scaled(GetSafeHwnd(), 26);
 		const int editHeight = height - margin * 3 - buttonHeight;
 		moveControl(this, IDC_EDIT_NETWORK_INFO, margin, margin, width - margin * 2, editHeight);
-		moveControl(this, IDC_BUTTON_NETWORK_INFO_COPY, width - margin * 2 - scaled(GetSafeHwnd(), 130),
+		const int closeX = width - margin - scaled(GetSafeHwnd(), 62);
+		const int copyX = closeX - scaled(GetSafeHwnd(), 70);
+		const int refreshX = copyX - scaled(GetSafeHwnd(), 70);
+		moveControl(this, IDC_BUTTON_NETWORK_INFO_REFRESH, refreshX,
 			height - margin - buttonHeight, scaled(GetSafeHwnd(), 62), buttonHeight);
-		moveControl(this, IDCANCEL, width - margin - scaled(GetSafeHwnd(), 62),
+		moveControl(this, IDC_BUTTON_NETWORK_INFO_COPY, copyX,
+			height - margin - buttonHeight, scaled(GetSafeHwnd(), 62), buttonHeight);
+		moveControl(this, IDCANCEL, closeX,
 			height - margin - buttonHeight, scaled(GetSafeHwnd(), 62), buttonHeight);
 		edit.ShowScrollBar(SB_VERT, edit.GetLineCount() * scaled(GetSafeHwnd(), 17) > editHeight);
 		RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
@@ -351,6 +356,8 @@ protected:
 			AfxMessageBox(IDS_ERROR_CLIPBOARD, MB_OK | MB_ICONERROR);
 		}
 	}
+
+	afx_msg void OnRefresh() { EndDialog(IDRETRY); }
 
 	DECLARE_MESSAGE_MAP()
 
@@ -364,6 +371,7 @@ private:
 
 BEGIN_MESSAGE_MAP(NetworkInfoDialog, CDialog)
 	ON_BN_CLICKED(IDC_BUTTON_NETWORK_INFO_COPY, &NetworkInfoDialog::OnCopy)
+	ON_BN_CLICKED(IDC_BUTTON_NETWORK_INFO_REFRESH, &NetworkInfoDialog::OnRefresh)
 	ON_WM_SIZE()
 	ON_WM_GETMINMAXINFO()
 END_MESSAGE_MAP()
@@ -1205,10 +1213,25 @@ void WinMTRDialog::showNodeDetails(const DisplayRow& row)
 void WinMTRDialog::startNetworkInfoQuery()
 {
 	stopNetworkInfoQuery();
-	buttonNetworkDetails.EnableWindow(FALSE);
-	SetDlgItemTextW(IDC_STATIC_PUBLIC_IP, loadString(IDS_PUBLIC_INFO_QUERYING));
-	for (const int id : { IDC_STATIC_PUBLIC_HOSTNAME, IDC_STATIC_PUBLIC_COUNTRY, IDC_STATIC_PUBLIC_CITY,
-		IDC_STATIC_PUBLIC_ASN, IDC_STATIC_PUBLIC_ISP }) SetDlgItemTextW(id, loadString(IDS_VALUE_UNAVAILABLE));
+	bool hasPreviousValue = false;
+	{
+		std::scoped_lock lock(networkInfoMutex);
+		hasPreviousValue = networkInfo.anyAvailable();
+		networkInfo.refreshing = true;
+		networkInfo.stale = false;
+		networkInfo.refreshError.clear();
+	}
+	if (hasPreviousValue) {
+		updateNetworkInfoSummary();
+	}
+	else {
+		buttonNetworkDetails.EnableWindow(FALSE);
+		SetDlgItemTextW(IDC_STATIC_PUBLIC_IP, loadString(IDS_PUBLIC_INFO_QUERYING));
+		for (const int id : { IDC_STATIC_PUBLIC_HOSTNAME, IDC_STATIC_PUBLIC_COUNTRY,
+			IDC_STATIC_PUBLIC_CITY, IDC_STATIC_PUBLIC_ASN, IDC_STATIC_PUBLIC_ISP }) {
+			SetDlgItemTextW(id, loadString(IDS_VALUE_UNAVAILABLE));
+		}
+	}
 
 	// Replacing a live jthread would join it on the UI thread.  Let the old
 	// request finish cooperatively, then start the requested refresh from its
@@ -1227,7 +1250,16 @@ void WinMTRDialog::startNetworkInfoQuery()
 		const bool deliver = !token.stop_requested() && generation == networkInfoGeneration.load();
 		if (deliver) {
 			std::scoped_lock lock(networkInfoMutex);
-			networkInfo = std::move(value);
+			value.refreshing = false;
+			if (value.anyAvailable() || !networkInfo.anyAvailable()) {
+				value.stale = false;
+				networkInfo = std::move(value);
+			}
+			else {
+				networkInfo.refreshing = false;
+				networkInfo.stale = true;
+				networkInfo.refreshError = std::move(value.refreshError);
+			}
 		}
 		networkInfoRunning = false;
 		PostMessageW(messageNetworkInfoReady, static_cast<WPARAM>(generation), deliver ? 1 : 0);
@@ -1281,7 +1313,11 @@ void WinMTRDialog::updateNetworkInfoSummary()
 	const auto& address = value.ipv4.available() ? value.ipv4 : value.ipv6;
 	const CString unavailable = loadString(IDS_VALUE_UNAVAILABLE);
 	const CString queryFailed = loadString(IDS_PUBLIC_INFO_QUERY_FAILED);
-	SetDlgItemTextW(IDC_STATIC_PUBLIC_IP, address.available() ? address.address.c_str() : queryFailed.GetString());
+	std::wstring displayedAddress = address.address;
+	if (address.available() && value.refreshing) displayedAddress += L"（更新中）";
+	else if (address.available() && value.stale) displayedAddress += L"（資料可能已過期）";
+	SetDlgItemTextW(IDC_STATIC_PUBLIC_IP,
+		address.available() ? displayedAddress.c_str() : queryFailed.GetString());
 	SetDlgItemTextW(IDC_STATIC_PUBLIC_HOSTNAME,
 		address.hostname.empty() ? unavailable.GetString() : address.hostname.c_str());
 	SetDlgItemTextW(IDC_STATIC_PUBLIC_COUNTRY,
@@ -1309,7 +1345,7 @@ void WinMTRDialog::showNetworkInfoDialog()
 	}
 	if (!value.complete || !value.anyAvailable()) return;
 	NetworkInfoDialog dialog(winmtr::network_data::formatDetails(value), this);
-	dialog.DoModal();
+	if (dialog.DoModal() == IDRETRY && queryPublicInfo.load()) startNetworkInfoQuery();
 }
 
 void WinMTRDialog::OnNetworkDetails()
