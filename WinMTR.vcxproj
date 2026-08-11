@@ -1417,6 +1417,7 @@
     <ClInclude Include="WinMTRNetworkData.h" />
     <ClInclude Include="WinMTRProperties.h" />
     <ClInclude Include="WinMTRProbeParameters.h" />
+    <ClInclude Include="WinMTRProviderJson.h" />
     <ClInclude Include="WinMTRRoutePolicy.h" />
     <ClInclude Include="WinMTRSerialization.h" />
     <ClCompile Include="WinMTRUtils.ixx">

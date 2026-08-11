@@ -13,7 +13,7 @@
 #include "WinMTRNetworkData.h"
 #include "WinMTRAddressPolicy.h"
 #include "WinMTRBranding.h"
-#include "WinMTRJson.h"
+#include "WinMTRProviderJson.h"
 
 #include <algorithm>
 #include <atomic>
@@ -179,11 +179,6 @@ using DnsRecordList = std::unique_ptr<DNS_RECORDW, DnsRecordCloser>;
 	return result;
 }
 
-[[nodiscard]] std::optional<std::string> jsonString(std::string_view json, std::string_view key)
-{
-	return winmtr::json::get_string(json, key);
-}
-
 [[nodiscard]] std::wstring trim(std::wstring value)
 {
 	const auto notSpace = [](wchar_t ch) { return std::iswspace(ch) == 0; };
@@ -210,10 +205,10 @@ void appendFailureReason(IpConnectionInfo& info, std::wstring_view reason)
 	return value;
 }
 
-void assignProviderField(IpConnectionInfo& info, std::wstring& target,
-	std::string_view json, std::string_view key, std::size_t maximum)
+void assignProviderValue(IpConnectionInfo& info, std::wstring& target,
+	const std::optional<std::string>& value, std::size_t maximum)
 {
-	if (const auto value = jsonString(json, key)) {
+	if (value) {
 		target = boundedProviderText(utf8ToWide(*value), maximum, info);
 	}
 }
@@ -388,25 +383,27 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 [[nodiscard]] IpConnectionInfo parseIpInfo(const std::string& json)
 {
 	IpConnectionInfo info;
-	assignProviderField(info, info.address, json, "ip", 64);
-	assignProviderField(info, info.hostname, json, "hostname", 253);
-	assignProviderField(info, info.city, json, "city", 128);
-	assignProviderField(info, info.region, json, "region", 128);
-	assignProviderField(info, info.countryCode, json, "country", 8);
-	if (const auto organization = jsonString(json, "org")) parseOrganization(utf8ToWide(*organization), info);
+	const auto fields = winmtr::provider_json::parse_ipinfo(json);
+	assignProviderValue(info, info.address, fields.address, 64);
+	assignProviderValue(info, info.hostname, fields.hostname, 253);
+	assignProviderValue(info, info.city, fields.city, 128);
+	assignProviderValue(info, info.region, fields.region, 128);
+	assignProviderValue(info, info.countryCode, fields.country_code, 8);
+	if (fields.organization) parseOrganization(utf8ToWide(*fields.organization), info);
 	return info;
 }
 
 [[nodiscard]] IpConnectionInfo parseIpApi(const std::string& json)
 {
 	IpConnectionInfo info;
-	assignProviderField(info, info.address, json, "ip", 64);
-	assignProviderField(info, info.city, json, "city", 128);
-	assignProviderField(info, info.region, json, "region", 128);
-	assignProviderField(info, info.countryCode, json, "country_code", 8);
-	assignProviderField(info, info.country, json, "country_name", 128);
-	assignProviderField(info, info.asn, json, "asn", 32);
-	assignProviderField(info, info.isp, json, "org", 512);
+	const auto fields = winmtr::provider_json::parse_ipapi(json);
+	assignProviderValue(info, info.address, fields.address, 64);
+	assignProviderValue(info, info.city, fields.city, 128);
+	assignProviderValue(info, info.region, fields.region, 128);
+	assignProviderValue(info, info.countryCode, fields.country_code, 8);
+	assignProviderValue(info, info.country, fields.country, 128);
+	assignProviderValue(info, info.asn, fields.asn, 32);
+	assignProviderValue(info, info.isp, fields.organization, 512);
 	if (info.asn.size() > 2 && _wcsnicmp(info.asn.c_str(), L"AS", 2) == 0) info.asn.erase(0, 2);
 	return info;
 }

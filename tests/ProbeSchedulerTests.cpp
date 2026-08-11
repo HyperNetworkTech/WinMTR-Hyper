@@ -1,5 +1,6 @@
 #include "WinMTRProbeScheduler.h"
 #include "WinMTRProbeParameters.h"
+#include "WinMTRProviderJson.h"
 #include "WinMTRAddressPolicy.h"
 #include "WinMTRJson.h"
 #include "WinMTRSerialization.h"
@@ -471,6 +472,34 @@ void test_probe_packet_parameters()
 		"IPv4-only DF flag leaked into IPv6");
 }
 
+void test_provider_json_fields()
+{
+	const auto ipinfo = winmtr::provider_json::parse_ipinfo(
+		R"({"ip":"2001:db8::1","hostname":"node.\u4f8b\u5b50","city":"Taipei","region":"Taiwan","country":"TW","org":"AS64500 Example, Inc."})");
+	require(ipinfo.address && *ipinfo.address == "2001:db8::1",
+		"ipinfo address was not parsed");
+	require(ipinfo.hostname && *ipinfo.hostname == "node.\xE4\xBE\x8B\xE5\xAD\x90",
+		"ipinfo Unicode hostname was not decoded");
+	require(ipinfo.country_code && *ipinfo.country_code == "TW"
+		&& ipinfo.organization && *ipinfo.organization == "AS64500 Example, Inc.",
+		"ipinfo country/organization fields changed");
+
+	const auto ipapi = winmtr::provider_json::parse_ipapi(
+		R"({"ip":"203.0.113.1","city":"Taipei","region":"Taiwan","country_name":"Taiwan","country_code":"TW","asn":"AS64500","org":"Example"})");
+	require(ipapi.country && *ipapi.country == "Taiwan"
+		&& ipapi.asn && *ipapi.asn == "AS64500",
+		"ipapi country/ASN fields changed");
+
+	const auto duplicate = winmtr::provider_json::parse_ipinfo(
+		R"({"ip":"203.0.113.1","ip":"198.51.100.2","city":"Taipei"})");
+	require(!duplicate.address && !duplicate.city,
+		"provider object with duplicate keys was partially accepted");
+	const auto wrongTypes = winmtr::provider_json::parse_ipapi(
+		R"({"ip":null,"city":123,"org":false})");
+	require(!wrongTypes.address && !wrongTypes.city && !wrongTypes.organization,
+		"non-string provider fields were accepted");
+}
+
 void fuzz_json_parser_offline()
 {
 	std::uint64_t state = 0x243f6a8885a308d3ull;
@@ -485,6 +514,8 @@ void fuzz_json_parser_offline()
 			value = static_cast<char>(state >> 56);
 		}
 		(void)winmtr::json::get_string(input, "ip");
+		(void)winmtr::provider_json::parse_ipinfo(input);
+		(void)winmtr::provider_json::parse_ipapi(input);
 	}
 }
 
@@ -508,6 +539,7 @@ int main()
 		test_deterministic_scheduler_resource_budget();
 		test_route_policy_scripted_changes();
 		test_probe_packet_parameters();
+		test_provider_json_fields();
 		fuzz_json_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;
