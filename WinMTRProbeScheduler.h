@@ -54,6 +54,9 @@ struct ProbeCounters final {
 	std::uint64_t cache_skipped = 0;
 	std::uint64_t late_completions = 0;
 	std::uint64_t transport_outstanding = 0;
+	std::uint64_t scheduler_late_slots = 0;
+	std::uint64_t scheduler_lateness_total_ms = 0;
+	std::uint64_t scheduler_lateness_max_ms = 0;
 
 	[[nodiscard]] double loss_percent() const noexcept
 	{
@@ -142,6 +145,15 @@ public:
 			if (now < state.next_send_at || quota_reached(state)) continue;
 
 			const auto scheduled_at = state.next_send_at;
+			const auto lateness = now > scheduled_at
+				? static_cast<std::uint64_t>(now - scheduled_at)
+				: 0u;
+			if (lateness != 0) {
+				++state.counters.scheduler_late_slots;
+				state.counters.scheduler_lateness_total_ms += lateness;
+				state.counters.scheduler_lateness_max_ms = std::max(
+					state.counters.scheduler_lateness_max_ms, lateness);
+			}
 			do {
 				state.next_send_at += config_.interval_ms;
 			} while (state.next_send_at <= now);

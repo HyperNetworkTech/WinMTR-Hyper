@@ -62,7 +62,7 @@ export namespace WinMTRUtils {
 	export constexpr auto DEFAULT_MINIMUM_TTL = 0u;
 	export constexpr auto MIN_MINIMUM_TTL = 0u;
 
-	export constexpr auto DEFAULT_UNKNOWN_HOST_LIMIT = 5u;
+	export constexpr auto DEFAULT_UNKNOWN_HOST_LIMIT = 12u;
 	export constexpr auto MIN_UNKNOWN_HOST_LIMIT = 1u;
 	export constexpr auto MAX_UNKNOWN_HOST_LIMIT = 64u;
 

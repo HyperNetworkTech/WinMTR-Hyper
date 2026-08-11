@@ -175,14 +175,17 @@ private:
 		unsigned cache_seconds, std::uint64_t expected_epoch,
 		bool& is_destination) const noexcept;
 	void commitTimeout(unsigned ttl, std::uint64_t expected_epoch) noexcept;
-	void commitIssued(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitIssued(unsigned ttl, std::uint64_t expected_epoch,
+		std::uint64_t scheduler_lateness_ms) noexcept;
 	void commitLocalError(unsigned ttl, std::uint64_t expected_epoch,
-		bool was_issued) noexcept;
+		bool was_issued, std::uint32_t error_code) noexcept;
 	void commitSchedulerSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitCacheSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitLateCompletion(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitReply(unsigned ttl, const SOCKADDR_INET& responder, unsigned round_trip_ms,
 		std::uint64_t cycle, std::uint64_t tick, std::uint64_t expected_session,
-		std::uint64_t expected_epoch, bool is_destination, bool resolve_hostname,
+		std::uint64_t expected_epoch, WinMTRProbeOutcome outcome,
+		std::uint32_t status_code, bool is_destination, bool resolve_hostname,
 		bool lookup_asn_isp);
 	void scheduleReverseLookup(const SOCKADDR_INET& address,
 		std::uint64_t expected_session, std::uint64_t expected_epoch,

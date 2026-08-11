@@ -36,6 +36,7 @@ export module WinMTRSNetHost;
 
 import WinMTRIPUtils;
 import WinMTRUtils;
+import <algorithm>;
 import <string>;
 import <vector>;
 import <cstdint>;
@@ -75,6 +76,21 @@ export struct s_netresponder final {
 	}
 };
 
+export enum class WinMTRProbeOutcome : std::uint8_t {
+	none,
+	in_flight,
+	echo_reply,
+	ttl_expired,
+	destination_unreachable,
+	packet_too_big,
+	icmp_error,
+	timeout,
+	local_error,
+	scheduler_skipped,
+	cached,
+	late_discarded,
+};
+
 export struct s_nethost final {
 	SOCKADDR_INET addr = {};
 	std::wstring name;
@@ -88,7 +104,11 @@ export struct s_nethost final {
 	std::uint64_t in_flight = 0;	// issued but not logically completed
 	std::uint64_t local_errors = 0;
 	std::uint64_t scheduler_skipped = 0;
+	std::uint64_t cache_skipped = 0;
 	std::uint64_t late_completions = 0;
+	std::uint64_t scheduler_late_slots = 0;
+	std::uint64_t scheduler_lateness_total_ms = 0;
+	std::uint64_t scheduler_lateness_max_ms = 0;
 	std::uint64_t total = 0;		// total round-trip time in milliseconds
 	int last = 0;				// last time
 	int best = 0;				// best time
@@ -106,7 +126,10 @@ export struct s_nethost final {
 	double mean_ms = 0.0;
 	double m2_ms = 0.0;
 	double previous_reply_ms = 0.0;
+	double recent_jitter_ms = 0.0;
 	bool has_previous_reply = false;
+	WinMTRProbeOutcome last_outcome = WinMTRProbeOutcome::none;
+	std::uint32_t last_error_code = 0;
 
 	[[nodiscard]]
 	inline int getPercent() const noexcept {
@@ -143,10 +166,18 @@ export struct s_nethost final {
 		hop = hop_number;
 	}
 
-	void noteIssued() noexcept
+	void noteIssued(std::uint64_t scheduler_lateness_ms) noexcept
 	{
 		++xmit;
 		++in_flight;
+		last_outcome = WinMTRProbeOutcome::in_flight;
+		last_error_code = 0;
+		if (scheduler_lateness_ms != 0) {
+			++scheduler_late_slots;
+			scheduler_lateness_total_ms += scheduler_lateness_ms;
+			scheduler_lateness_max_ms = std::max(scheduler_lateness_max_ms,
+				scheduler_lateness_ms);
+		}
 	}
 
 	void noteTimeout() noexcept
@@ -154,9 +185,12 @@ export struct s_nethost final {
 		++completed;
 		++timed_out;
 		if (in_flight != 0) --in_flight;
+		last_outcome = WinMTRProbeOutcome::timeout;
+		last_error_code = 0;
 	}
 
-	void noteReply(unsigned round_trip_ms, std::uint64_t cycle, std::uint64_t tick) noexcept
+	void noteReply(unsigned round_trip_ms, std::uint64_t cycle, std::uint64_t tick,
+		WinMTRProbeOutcome outcome, std::uint32_t status_code) noexcept
 	{
 		++completed;
 		++returned;
@@ -175,32 +209,48 @@ export struct s_nethost final {
 		mean_ms += delta / static_cast<double>(returned);
 		const auto delta_after_mean = sample - mean_ms;
 		m2_ms += delta * delta_after_mean;
-		stddev = std::sqrt(m2_ms / static_cast<double>(returned));
+		stddev = returned > 1
+			? std::sqrt(m2_ms / static_cast<double>(returned - 1u))
+			: 0.0;
 
 		if (has_previous_reply) {
-			const auto delta_from_previous = std::abs(sample - previous_reply_ms);
-			jitter += (delta_from_previous - jitter) / 16.0;
+			recent_jitter_ms = std::abs(sample - previous_reply_ms);
+			jitter += (recent_jitter_ms - jitter) / 16.0;
 		}
 		previous_reply_ms = sample;
 		has_previous_reply = true;
 		last_reply_tick = tick;
 		last_reply_cycle = cycle;
+		last_outcome = outcome;
+		last_error_code = status_code;
 	}
 
-	void noteLocalError(bool was_issued) noexcept
+	void noteLocalError(bool was_issued, std::uint32_t error_code) noexcept
 	{
 		++local_errors;
 		if (was_issued && in_flight != 0) --in_flight;
+		last_outcome = WinMTRProbeOutcome::local_error;
+		last_error_code = error_code;
 	}
 
 	void noteSchedulerSkipped() noexcept
 	{
 		++scheduler_skipped;
+		last_outcome = WinMTRProbeOutcome::scheduler_skipped;
+		last_error_code = 0;
+	}
+
+	void noteCacheSkipped() noexcept
+	{
+		++cache_skipped;
+		last_outcome = WinMTRProbeOutcome::cached;
+		last_error_code = 0;
 	}
 
 	void noteLateCompletion() noexcept
 	{
 		++late_completions;
+		last_outcome = WinMTRProbeOutcome::late_discarded;
 	}
 
 	[[nodiscard]]

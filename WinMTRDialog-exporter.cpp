@@ -37,6 +37,26 @@ namespace {
 	return value;
 }
 
+[[nodiscard]] constexpr std::wstring_view outcomeName(
+	WinMTRProbeOutcome outcome) noexcept
+{
+	switch (outcome) {
+	case WinMTRProbeOutcome::none: return L"none";
+	case WinMTRProbeOutcome::in_flight: return L"in_flight";
+	case WinMTRProbeOutcome::echo_reply: return L"echo_reply";
+	case WinMTRProbeOutcome::ttl_expired: return L"ttl_expired";
+	case WinMTRProbeOutcome::destination_unreachable: return L"destination_unreachable";
+	case WinMTRProbeOutcome::packet_too_big: return L"packet_too_big";
+	case WinMTRProbeOutcome::icmp_error: return L"icmp_error";
+	case WinMTRProbeOutcome::timeout: return L"timeout";
+	case WinMTRProbeOutcome::local_error: return L"local_error";
+	case WinMTRProbeOutcome::scheduler_skipped: return L"scheduler_skipped";
+	case WinMTRProbeOutcome::cached: return L"cached";
+	case WinMTRProbeOutcome::late_discarded: return L"late_discarded";
+	}
+	return L"none";
+}
+
 [[nodiscard]] std::array<std::wstring, 14> exportHeaders()
 {
 	constexpr std::array<UINT, 14> ids{
@@ -234,7 +254,11 @@ struct ExportRow final {
 [[nodiscard]] std::wstring serializeJson(const WinMTRTraceSnapshot& snapshot)
 {
 	std::wostringstream out;
-	out << L"{\r\n  \"target\": \"" << jsonEscape(snapshot.target) << L"\",\r\n  \"hops\": [";
+	out << L"{\r\n  \"schema_version\": 1,"
+		<< L"\r\n  \"statistics\": {\"loss\":\"timed_out/completed\","
+		<< L"\"stddev\":\"sample_standard_deviation\","
+		<< L"\"jitter\":\"ewma_absolute_consecutive_delta_alpha_1_16\"},"
+		<< L"\r\n  \"target\": \"" << jsonEscape(snapshot.target) << L"\",\r\n  \"hops\": [";
 	for (size_t hopIndex = 0; hopIndex < snapshot.hops.size(); ++hopIndex) {
 		const auto& hop = snapshot.hops[hopIndex];
 		if (hopIndex != 0) out << L',';
@@ -250,12 +274,20 @@ struct ExportRow final {
 			<< L"\"in_flight\":" << hop.in_flight << L','
 			<< L"\"local_errors\":" << hop.local_errors << L','
 			<< L"\"scheduler_skipped\":" << hop.scheduler_skipped << L','
+			<< L"\"cache_skipped\":" << hop.cache_skipped << L','
 			<< L"\"late_completions\":" << hop.late_completions << L','
+			<< L"\"scheduler_late_slots\":" << hop.scheduler_late_slots << L','
+			<< L"\"scheduler_lateness_total_ms\":"
+			<< hop.scheduler_lateness_total_ms << L','
+			<< L"\"scheduler_lateness_max_ms\":" << hop.scheduler_lateness_max_ms << L','
+			<< L"\"last_outcome\":\"" << outcomeName(hop.last_outcome) << L"\","
+			<< L"\"last_error_code\":" << hop.last_error_code << L','
 			<< L"\"best_ms\":" << hop.best << L','
 			<< L"\"average_ms\":" << std::format(L"{:.2f}", hop.getAverageMs()) << L','
 			<< L"\"worst_ms\":" << hop.worst << L','
 			<< L"\"last_ms\":" << hop.last << L','
 			<< L"\"jitter_ms\":" << std::format(L"{:.2f}", hop.jitter) << L','
+			<< L"\"recent_jitter_ms\":" << std::format(L"{:.2f}", hop.recent_jitter_ms) << L','
 			<< L"\"stddev_ms\":" << std::format(L"{:.2f}", hop.stddev) << L','
 			<< L"\"country\":\"" << jsonEscape(hop.country) << L"\","
 			<< L"\"asn\":\"" << jsonEscape(hop.asn) << L"\","

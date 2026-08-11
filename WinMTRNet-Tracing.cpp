@@ -111,12 +111,37 @@ struct parsed_reply final {
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-[[nodiscard]] bool is_usable_trace_reply(DWORD status) noexcept
+[[nodiscard]] WinMTRProbeOutcome classify_probe_outcome(DWORD status) noexcept
 {
-	// IcmpParseReplies returning a record means an ICMP response arrived.  Keep
-	// remote unreachable/packet-too-big/parameter responses as real nodes; only
-	// a completed no-reply timeout or an unusable local failure is packet loss.
-	return status != IP_REQ_TIMED_OUT && status != IP_GENERAL_FAILURE;
+	switch (status) {
+	case IP_SUCCESS:
+		return WinMTRProbeOutcome::echo_reply;
+	case IP_TTL_EXPIRED_TRANSIT:
+	case IP_TTL_EXPIRED_REASSEM:
+		return WinMTRProbeOutcome::ttl_expired;
+	case IP_DEST_NET_UNREACHABLE:
+	case IP_DEST_HOST_UNREACHABLE:
+	case IP_DEST_PROT_UNREACHABLE:
+	case IP_DEST_PORT_UNREACHABLE:
+	case IP_BAD_DESTINATION:
+		return WinMTRProbeOutcome::destination_unreachable;
+	case IP_PACKET_TOO_BIG:
+		return WinMTRProbeOutcome::packet_too_big;
+	case IP_REQ_TIMED_OUT:
+		return WinMTRProbeOutcome::timeout;
+	case IP_GENERAL_FAILURE:
+		return WinMTRProbeOutcome::local_error;
+	default:
+		return WinMTRProbeOutcome::icmp_error;
+	}
+}
+
+[[nodiscard]] bool is_usable_trace_reply(WinMTRProbeOutcome outcome) noexcept
+{
+	// Every parsed remote ICMP response is a real observation. Only a no-reply
+	// timeout or a failure before the network accepted the request is excluded.
+	return outcome != WinMTRProbeOutcome::timeout
+		&& outcome != WinMTRProbeOutcome::local_error;
 }
 
 [[nodiscard]] std::size_t reply_buffer_size(ADDRESS_FAMILY family, std::size_t request_size) noexcept
@@ -283,6 +308,7 @@ struct scheduled_probe final : std::enable_shared_from_this<scheduled_probe> {
 	PTP_WORK work = nullptr;
 	winmtr::probe::CompletionKind completion_kind =
 		winmtr::probe::CompletionKind::local_error;
+	WinMTRProbeOutcome outcome = WinMTRProbeOutcome::none;
 	parsed_reply parsed;
 	winmtr::probe::MonotonicMilliseconds completed_at = 0;
 	bool destination_reply = false;
@@ -318,14 +344,22 @@ struct probe_completion_queue final {
 		return result;
 	}
 
-	void wait_until(std::chrono::steady_clock::time_point deadline)
+	void wait_until(std::stop_token stop_token,
+		std::chrono::steady_clock::time_point deadline)
 	{
 		std::unique_lock lock(mutex);
-		changed.wait_until(lock, deadline, [this] { return !ready.empty(); });
+		(void)changed.wait_until(lock, stop_token, deadline,
+			[this] { return !ready.empty(); });
+	}
+
+	void wait()
+	{
+		std::unique_lock lock(mutex);
+		changed.wait(lock, [this] { return !ready.empty(); });
 	}
 
 	std::mutex mutex;
-	std::condition_variable changed;
+	std::condition_variable_any changed;
 	std::deque<std::shared_ptr<scheduled_probe>> ready;
 };
 
@@ -371,7 +405,8 @@ void CALLBACK probe_work_callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK
 			request->options, request->payload, request->timeout_ms);
 		request->completed_at = monotonic_now();
 		request->parsed = parse_reply(request->probe, request->destination.si_family);
-		if (is_usable_trace_reply(request->parsed.status)
+		request->outcome = classify_probe_outcome(request->parsed.status);
+		if (is_usable_trace_reply(request->outcome)
 			&& isValidAddress(request->parsed.address)) {
 			request->completion_kind = winmtr::probe::CompletionKind::reply;
 			request->destination_reply = request->parsed.status == IP_SUCCESS
@@ -380,9 +415,11 @@ void CALLBACK probe_work_callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK
 		else if (request->probe.issued
 			&& request->probe.issue_error == IP_REQ_TIMED_OUT) {
 			request->completion_kind = winmtr::probe::CompletionKind::timeout;
+			request->outcome = WinMTRProbeOutcome::timeout;
 		}
 		else {
 			request->completion_kind = winmtr::probe::CompletionKind::local_error;
+			request->outcome = WinMTRProbeOutcome::local_error;
 		}
 	}
 	catch (...) {
@@ -390,6 +427,7 @@ void CALLBACK probe_work_callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK
 		request->probe.issued = false;
 		request->probe.issue_error = ERROR_NOT_ENOUGH_MEMORY;
 		request->completion_kind = winmtr::probe::CompletionKind::local_error;
+		request->outcome = WinMTRProbeOutcome::local_error;
 	}
 	if (request->completed_at == 0) request->completed_at = monotonic_now();
 	request->completions->push(std::move(request));
@@ -540,7 +578,8 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 				commitReply(request->token.ttl, request->parsed.address,
 					request->parsed.round_trip_ms, request->token.sequence,
 					request->probe.completed_tick, this_session, request->token.epoch,
-					request->destination_reply, trace_options.resolve_hostnames,
+					request->outcome, request->parsed.status, request->destination_reply,
+					trace_options.resolve_hostnames,
 					trace_options.lookup_asn_isp);
 				session_had_usable_reply = true;
 				highest_response_ttl = std::max(highest_response_ttl, request->token.ttl);
@@ -559,7 +598,10 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 				notify_changed();
 				break;
 			case winmtr::probe::CompletionDisposition::accepted_local_error:
-				commitLocalError(request->token.ttl, request->token.epoch, true);
+				commitLocalError(request->token.ttl, request->token.epoch, true,
+					request->probe.issue_error != ERROR_SUCCESS
+						? request->probe.issue_error
+						: request->parsed.status);
 				notify_changed();
 				break;
 			case winmtr::probe::CompletionDisposition::late_discarded:
@@ -599,10 +641,12 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					trace_options.reply_cache_seconds, slot.token.epoch,
 					cached_destination)) {
 					(void)scheduler.mark_cached(slot.token);
+					commitCacheSkipped(slot.token.ttl, slot.token.epoch);
 					if (cached_destination) {
 						session_reached_destination = true;
 						scheduler.set_last_ttl(std::max(mandatory_ttl, slot.token.ttl), now);
 					}
+					notify_changed();
 					continue;
 				}
 				try {
@@ -616,16 +660,20 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					request->timeout_ms = trace_options.timeout_ms;
 					request->completions = &completions;
 					if (!request->icmp_handle) {
+						const auto error = GetLastError();
 						(void)scheduler.mark_issue_failed(slot.token);
-						commitLocalError(slot.token.ttl, slot.token.epoch, false);
+						commitLocalError(slot.token.ttl, slot.token.epoch, false,
+							error != ERROR_SUCCESS ? error : ERROR_INVALID_HANDLE);
 						notify_changed();
 						continue;
 					}
 					request->work = CreateThreadpoolWork(probe_work_callback,
 						request.get(), worker_pool.environment());
 					if (request->work == nullptr) {
+						const auto error = GetLastError();
 						(void)scheduler.mark_issue_failed(slot.token);
-						commitLocalError(slot.token.ttl, slot.token.epoch, false);
+						commitLocalError(slot.token.ttl, slot.token.epoch, false,
+							error != ERROR_SUCCESS ? error : ERROR_NOT_ENOUGH_MEMORY);
 						notify_changed();
 						continue;
 					}
@@ -634,13 +682,18 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 						requests.erase(slot.token.sequence);
 						continue;
 					}
-					commitIssued(slot.token.ttl, slot.token.epoch);
+					const auto scheduler_lateness_ms = now > slot.scheduled_at
+						? static_cast<std::uint64_t>(now - slot.scheduled_at)
+						: 0u;
+					commitIssued(slot.token.ttl, slot.token.epoch,
+						scheduler_lateness_ms);
 					notify_changed();
 					SubmitThreadpoolWork(request->work);
 				}
 				catch (...) {
 					(void)scheduler.mark_issue_failed(slot.token);
-					commitLocalError(slot.token.ttl, slot.token.epoch, false);
+					commitLocalError(slot.token.ttl, slot.token.epoch, false,
+						ERROR_NOT_ENOUGH_MEMORY);
 					notify_changed();
 				}
 			}
@@ -653,11 +706,14 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 
 		if (stopping && scheduler.transport_outstanding() == 0 && requests.empty()) break;
 
-		auto wake = scheduler.next_wake_at().value_or(now + 50);
-		wake = std::min(wake, now + 50);
-		if (wake <= now) continue;
-		completions.wait_until(std::chrono::steady_clock::time_point{
-			std::chrono::milliseconds{ wake } });
+		if (stopping) {
+			completions.wait();
+			continue;
+		}
+		const auto wake = scheduler.next_wake_at();
+		if (!wake || *wake <= now) continue;
+		completions.wait_until(stop_token, std::chrono::steady_clock::time_point{
+			std::chrono::milliseconds{ *wake } });
 	}
 	if (session_reached_destination) return WinMTRTraceResult::destination;
 	if (session_had_usable_reply) return WinMTRTraceResult::reply;
@@ -768,24 +824,25 @@ void WinMTRNet::commitTimeout(unsigned ttl, std::uint64_t expected_epoch) noexce
 	++data_revision;
 }
 
-void WinMTRNet::commitIssued(unsigned ttl, std::uint64_t expected_epoch) noexcept
+void WinMTRNet::commitIssued(unsigned ttl, std::uint64_t expected_epoch,
+	std::uint64_t scheduler_lateness_ms) noexcept
 {
 	if (ttl == 0 || ttl > host.size()) return;
 	std::scoped_lock lock(ghMutex);
 	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
-	host[ttl - 1].noteIssued();
+	host[ttl - 1].noteIssued(scheduler_lateness_ms);
 	display_max_ttl = std::max(display_max_ttl,
 		std::clamp(ttl, session_start_ttl, session_options.max_hops));
 	++data_revision;
 }
 
 void WinMTRNet::commitLocalError(unsigned ttl, std::uint64_t expected_epoch,
-	bool was_issued) noexcept
+	bool was_issued, std::uint32_t error_code) noexcept
 {
 	if (ttl == 0 || ttl > host.size()) return;
 	std::scoped_lock lock(ghMutex);
 	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
-	host[ttl - 1].noteLocalError(was_issued);
+	host[ttl - 1].noteLocalError(was_issued, error_code);
 	++data_revision;
 }
 
@@ -796,6 +853,16 @@ void WinMTRNet::commitSchedulerSkipped(unsigned ttl,
 	std::scoped_lock lock(ghMutex);
 	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
 	host[ttl - 1].noteSchedulerSkipped();
+	++data_revision;
+}
+
+void WinMTRNet::commitCacheSkipped(unsigned ttl,
+	std::uint64_t expected_epoch) noexcept
+{
+	if (ttl == 0 || ttl > host.size()) return;
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
+	host[ttl - 1].noteCacheSkipped();
 	++data_revision;
 }
 
@@ -812,7 +879,8 @@ void WinMTRNet::commitLateCompletion(unsigned ttl,
 void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 	unsigned round_trip_ms, std::uint64_t cycle, std::uint64_t tick,
 	std::uint64_t expected_session, std::uint64_t expected_epoch,
-	bool is_destination, bool resolve_hostname, bool lookup_asn_isp)
+	WinMTRProbeOutcome outcome, std::uint32_t status_code, bool is_destination,
+	bool resolve_hostname, bool lookup_asn_isp)
 {
 	if (ttl == 0 || ttl > host.size() || !isValidAddress(responder)) {
 		return;
@@ -826,7 +894,7 @@ void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 			return;
 		}
 		auto& hop = host[ttl - 1];
-		hop.noteReply(round_trip_ms, cycle, tick);
+		hop.noteReply(round_trip_ms, cycle, tick, outcome, status_code);
 		display_max_ttl = std::max(display_max_ttl,
 			std::clamp(ttl, session_start_ttl, session_options.max_hops));
 		if (is_destination) hop.last_destination_reply_tick = tick;

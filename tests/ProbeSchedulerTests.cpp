@@ -156,6 +156,21 @@ void test_local_failure_and_backpressure_are_not_network_loss()
 		"local failure/backpressure was reported as network loss");
 }
 
+void test_scheduler_lateness_is_observable()
+{
+	ProbeScheduler scheduler(standard_config(1));
+	scheduler.start(8, 13, 0);
+	auto due = scheduler.reserve_due(50);
+	require(due.slots.size() == 1, "late scheduler wake did not reserve a probe");
+	require(due.slots.front().scheduled_at == 0,
+		"scheduler discarded the original due timestamp");
+	const auto& counters = scheduler.counters(1);
+	require(counters.scheduler_late_slots == 1
+		&& counters.scheduler_lateness_total_ms == 50
+		&& counters.scheduler_lateness_max_ms == 50,
+		"scheduler lateness diagnostics are wrong");
+}
+
 void test_restart_epoch_race_10_000_times()
 {
 	ProbeScheduler scheduler(standard_config(2));
@@ -214,6 +229,7 @@ int main()
 		test_slow_reply_is_not_cut_off_by_interval();
 		test_late_reply_is_discarded_monotonically();
 		test_local_failure_and_backpressure_are_not_network_loss();
+		test_scheduler_lateness_is_observable();
 		test_restart_epoch_race_10_000_times();
 		test_start_stop_late_completion_race_10_000_times();
 		std::cout << "All probe scheduler tests passed.\n";
