@@ -1,4 +1,5 @@
 #include "WinMTRProbeScheduler.h"
+#include "WinMTRAddressPolicy.h"
 #include "WinMTRJson.h"
 #include "WinMTRSerialization.h"
 
@@ -252,6 +253,43 @@ void test_json_string_parser_boundaries()
 	std::string oversized(1024u * 1024u + 1u, ' ');
 	require(!winmtr::json::get_string(oversized, "value"),
 		"oversized JSON input was accepted");
+	std::string oversizedField = R"({"value":")";
+	oversizedField.append(4'097, 'x');
+	oversizedField += R"("})";
+	require(!winmtr::json::get_string(oversizedField, "value"),
+		"oversized JSON string field was accepted");
+}
+
+constexpr std::uint32_t ipv4(unsigned a, unsigned b, unsigned c, unsigned d)
+{
+	return (a << 24u) | (b << 16u) | (c << 8u) | d;
+}
+
+void test_special_use_address_policy()
+{
+	using winmtr::address_policy::is_public_ipv4;
+	using winmtr::address_policy::is_public_ipv6;
+	require(is_public_ipv4(ipv4(8, 8, 8, 8)), "public IPv4 was rejected");
+	for (const auto address : {
+		ipv4(0, 1, 2, 3), ipv4(10, 0, 0, 1), ipv4(100, 64, 0, 1),
+		ipv4(127, 0, 0, 1), ipv4(169, 254, 1, 1), ipv4(172, 31, 255, 255),
+		ipv4(192, 0, 2, 1), ipv4(192, 168, 1, 1), ipv4(198, 18, 0, 1),
+		ipv4(198, 51, 100, 1), ipv4(203, 0, 113, 1), ipv4(224, 0, 0, 1) }) {
+		require(!is_public_ipv4(address), "special-use IPv4 was accepted");
+	}
+
+	std::array<std::uint8_t, 16> publicIpv6{ 0x26, 0x06, 0x47, 0x00 };
+	require(is_public_ipv6(publicIpv6), "public IPv6 was rejected");
+	for (const auto& address : std::array{
+		std::array<std::uint8_t, 16>{ 0xfc },
+		std::array<std::uint8_t, 16>{ 0xfe, 0x80 },
+		std::array<std::uint8_t, 16>{ 0x20, 0x01, 0x00, 0x02 },
+		std::array<std::uint8_t, 16>{ 0x20, 0x01, 0x00, 0x10 },
+		std::array<std::uint8_t, 16>{ 0x20, 0x01, 0x00, 0x20 },
+		std::array<std::uint8_t, 16>{ 0x20, 0x01, 0x0d, 0xb8 },
+		std::array<std::uint8_t, 16>{ 0x3f, 0xff } }) {
+		require(!is_public_ipv6(address), "special-use IPv6 was accepted");
+	}
 }
 
 void test_serialization_security_and_unicode()
@@ -326,6 +364,35 @@ void test_grace_cancellation_is_not_loss()
 		"cancelled transport resource was not retired");
 }
 
+void test_deterministic_scheduler_resource_budget()
+{
+	auto config = standard_config(64);
+	config.interval_ms = 100;
+	config.timeout_ms = 10'000;
+	config.max_inflight = 1'024;
+	config.max_inflight_per_ttl = 100;
+	config.max_transport_outstanding = 1'024;
+	config.max_transport_outstanding_per_ttl = 100;
+	config.max_global_pps = 100;
+	ProbeScheduler scheduler(config);
+	scheduler.start(77, 91, 0);
+	std::array<std::uint64_t, 64> sent{};
+	std::uint64_t maximumInflight = 0;
+	for (MonotonicMilliseconds now = 0; now < 10'000; ++now) {
+		for (const auto& expired : scheduler.expire(now)) (void)expired;
+		for (const auto& slot : scheduler.reserve_due(now).slots) {
+			require(scheduler.mark_issued(slot.token, now), "budget probe was not issued");
+			++sent[slot.token.ttl - 1];
+		}
+		maximumInflight = std::max(maximumInflight, scheduler.logical_inflight());
+	}
+	const auto total = std::accumulate(sent.begin(), sent.end(), std::uint64_t{ 0 });
+	require(total == 1'000, "100 pps budget did not cap ten seconds at 1,000 probes");
+	require(maximumInflight <= 1'000, "deterministic workload exceeded bounded in-flight state");
+	require(std::ranges::all_of(sent, [](std::uint64_t value) { return value >= 15; }),
+		"resource budget scheduler starved a TTL");
+}
+
 void fuzz_json_parser_offline()
 {
 	std::uint64_t state = 0x243f6a8885a308d3ull;
@@ -356,9 +423,11 @@ int main()
 		test_restart_epoch_race_10_000_times();
 		test_start_stop_late_completion_race_10_000_times();
 		test_json_string_parser_boundaries();
+		test_special_use_address_policy();
 		test_serialization_security_and_unicode();
 		test_global_rate_limit_is_fair();
 		test_grace_cancellation_is_not_loss();
+		test_deterministic_scheduler_resource_budget();
 		fuzz_json_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;

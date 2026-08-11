@@ -11,6 +11,7 @@
 #include <Iphlpapi.h>
 
 #include "WinMTRNetworkData.h"
+#include "WinMTRAddressPolicy.h"
 #include "WinMTRBranding.h"
 #include "WinMTRJson.h"
 
@@ -23,7 +24,6 @@
 #include <cstdint>
 #include <cwctype>
 #include <functional>
-#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -192,6 +192,32 @@ using DnsRecordList = std::unique_ptr<DNS_RECORDW, DnsRecordCloser>;
 	return value;
 }
 
+void appendFailureReason(IpConnectionInfo& info, std::wstring_view reason)
+{
+	if (reason.empty()) return;
+	if (!info.failureReason.empty()) info.failureReason.append(L"; ");
+	info.failureReason.append(reason);
+}
+
+[[nodiscard]] std::wstring boundedProviderText(std::wstring value, std::size_t maximum,
+	IpConnectionInfo& info)
+{
+	value = trim(std::move(value));
+	if (value.size() <= maximum) return value;
+	value.resize(maximum > 0 ? maximum - 1 : 0);
+	if (maximum > 0) value.push_back(L'\x2026');
+	appendFailureReason(info, L"Provider field was truncated to a safe display limit");
+	return value;
+}
+
+void assignProviderField(IpConnectionInfo& info, std::wstring& target,
+	std::string_view json, std::string_view key, std::size_t maximum)
+{
+	if (const auto value = jsonString(json, key)) {
+		target = boundedProviderText(utf8ToWide(*value), maximum, info);
+	}
+}
+
 void addUnique(std::vector<std::wstring>& values, std::wstring value)
 {
 	if (!value.empty() && std::find(values.begin(), values.end(), value) == values.end()) {
@@ -343,12 +369,16 @@ BOOL CALLBACK enumGeoCallback(GEOID geoId)
 
 void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 {
-	organization = trim(std::move(organization));
+	organization = boundedProviderText(std::move(organization), 512, info);
 	if (organization.size() > 2 && (organization[0] == L'A' || organization[0] == L'a') &&
 		(organization[1] == L'S' || organization[1] == L's')) {
 		auto separator = organization.find_first_of(L" \t");
-		info.asn = organization.substr(2, separator == std::wstring::npos ? std::wstring::npos : separator - 2);
-		if (separator != std::wstring::npos) info.isp = trim(organization.substr(separator + 1));
+		info.asn = boundedProviderText(
+			organization.substr(2, separator == std::wstring::npos ? std::wstring::npos : separator - 2),
+			32, info);
+		if (separator != std::wstring::npos) {
+			info.isp = boundedProviderText(organization.substr(separator + 1), 512, info);
+		}
 	}
 	else if (!organization.empty()) {
 		info.isp = std::move(organization);
@@ -358,14 +388,11 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 [[nodiscard]] IpConnectionInfo parseIpInfo(const std::string& json)
 {
 	IpConnectionInfo info;
-	const auto assign = [&](std::wstring& target, std::string_view key) {
-		if (const auto value = jsonString(json, key)) target = utf8ToWide(*value);
-	};
-	assign(info.address, "ip");
-	assign(info.hostname, "hostname");
-	assign(info.city, "city");
-	assign(info.region, "region");
-	assign(info.countryCode, "country");
+	assignProviderField(info, info.address, json, "ip", 64);
+	assignProviderField(info, info.hostname, json, "hostname", 253);
+	assignProviderField(info, info.city, json, "city", 128);
+	assignProviderField(info, info.region, json, "region", 128);
+	assignProviderField(info, info.countryCode, json, "country", 8);
 	if (const auto organization = jsonString(json, "org")) parseOrganization(utf8ToWide(*organization), info);
 	return info;
 }
@@ -373,16 +400,13 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 [[nodiscard]] IpConnectionInfo parseIpApi(const std::string& json)
 {
 	IpConnectionInfo info;
-	const auto assign = [&](std::wstring& target, std::string_view key) {
-		if (const auto value = jsonString(json, key)) target = utf8ToWide(*value);
-	};
-	assign(info.address, "ip");
-	assign(info.city, "city");
-	assign(info.region, "region");
-	assign(info.countryCode, "country_code");
-	assign(info.country, "country_name");
-	assign(info.asn, "asn");
-	assign(info.isp, "org");
+	assignProviderField(info, info.address, json, "ip", 64);
+	assignProviderField(info, info.city, json, "city", 128);
+	assignProviderField(info, info.region, json, "region", 128);
+	assignProviderField(info, info.countryCode, json, "country_code", 8);
+	assignProviderField(info, info.country, json, "country_name", 128);
+	assignProviderField(info, info.asn, json, "asn", 32);
+	assignProviderField(info, info.isp, json, "org", 512);
 	if (info.asn.size() > 2 && _wcsnicmp(info.asn.c_str(), L"AS", 2) == 0) info.asn.erase(0, 2);
 	return info;
 }
@@ -460,7 +484,8 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 	}
 	auto first = responses.front();
 	auto delimiter = first.find(L'|');
-	std::wstring asn = trim(first.substr(0, delimiter));
+	IpConnectionInfo limits;
+	std::wstring asn = boundedProviderText(first.substr(0, delimiter), 32, limits);
 	if (asn.size() > 2 && _wcsnicmp(asn.c_str(), L"AS", 2) == 0) asn.erase(0, 2);
 	if (asn.empty()) {
 		recordProviderResult(providerName, false);
@@ -471,7 +496,9 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 	if (!names.empty()) {
 		auto line = names.front();
 		auto lastDelimiter = line.rfind(L'|');
-		if (lastDelimiter != std::wstring::npos) provider = trim(line.substr(lastDelimiter + 1));
+		if (lastDelimiter != std::wstring::npos) {
+			provider = boundedProviderText(line.substr(lastDelimiter + 1), 512, limits);
+		}
 	}
 	recordProviderResult(providerName, true);
 	return { asn, provider };
@@ -534,11 +561,11 @@ void finalize(IpConnectionInfo& info, std::stop_token stopToken, bool resolveHos
 	}
 	finalize(selected, stopToken, true);
 	if (selected.source.empty()) {
-		selected.failureReason = L"No provider returned a usable address for the requested family";
+		appendFailureReason(selected, L"No provider returned a usable address for the requested family");
 	}
 	else if (selected.source != primaryName) {
-		selected.failureReason = std::wstring(primaryName)
-			+ L" was unavailable or returned an unusable response";
+		appendFailureReason(selected, std::wstring(primaryName)
+			+ L" was unavailable or returned an unusable response");
 	}
 	return selected;
 }
@@ -611,50 +638,12 @@ bool isPublicAddress(const std::wstring& address) noexcept
 	if (!parseAddress(address, parsed)) return false;
 	if (parsed.si_family == AF_INET) {
 		const auto hostOrder = ntohl(parsed.Ipv4.sin_addr.S_un.S_addr);
-		const unsigned first = (hostOrder >> 24) & 0xff;
-		const unsigned second = (hostOrder >> 16) & 0xff;
-		if (first == 0 || first == 10 || first == 127 || first >= 224) return false;
-		if (first == 169 && second == 254) return false;
-		if (first == 172 && second >= 16 && second <= 31) return false;
-		if (first == 192 && second == 168) return false;
-		if (first == 100 && second >= 64 && second <= 127) return false;
-		const auto inPrefix = [hostOrder](std::uint32_t network, std::uint32_t mask) noexcept {
-			return (hostOrder & mask) == network;
-		};
-		if (inPrefix(0xc0000000u, 0xffffff00u)       // 192.0.0.0/24 protocol assignments
-			|| inPrefix(0xc0000200u, 0xffffff00u)    // TEST-NET-1
-			|| inPrefix(0xc0586300u, 0xffffff00u)    // deprecated 6to4 relay anycast
-			|| inPrefix(0xc6120000u, 0xfffe0000u)    // benchmarking
-			|| inPrefix(0xc6336400u, 0xffffff00u)    // TEST-NET-2
-			|| inPrefix(0xcb007100u, 0xffffff00u)) { // TEST-NET-3
-			return false;
-		}
-		return true;
+		return address_policy::is_public_ipv4(hostOrder);
 	}
-	const auto* bytes = reinterpret_cast<const unsigned char*>(&parsed.Ipv6.sin6_addr);
-	// Only globally routable unicast space is suitable for external metadata
-	// services.  Exclude the documentation, benchmarking and ORCHID blocks
-	// that live inside 2000::/3 as well.
-	if ((bytes[0] & 0xe0) != 0x20) return false;
-	const auto prefix = [bytes](std::initializer_list<unsigned char> value, unsigned bits) noexcept {
-		unsigned bit = 0;
-		for (const unsigned char expected : value) {
-			if (bit >= bits) break;
-			const unsigned used = std::min(8u, bits - bit);
-			const unsigned char mask = static_cast<unsigned char>(0xffu << (8u - used));
-			if ((bytes[bit / 8] & mask) != (expected & mask)) return false;
-			bit += used;
-		}
-		return bit >= bits;
-	};
-	if (prefix({ 0x20, 0x01, 0x00, 0x02, 0x00, 0x00 }, 48) // benchmarking
-		|| prefix({ 0x20, 0x01, 0x00, 0x10 }, 28)             // ORCHIDv1
-		|| prefix({ 0x20, 0x01, 0x00, 0x20 }, 28)             // ORCHIDv2
-		|| prefix({ 0x20, 0x01, 0x0d, 0xb8 }, 32)             // documentation
-		|| prefix({ 0x3f, 0xff, 0x00 }, 20)) {                // documentation
-		return false;
-	}
-	return true;
+	std::array<std::uint8_t, 16> bytes{};
+	std::copy_n(reinterpret_cast<const std::uint8_t*>(&parsed.Ipv6.sin6_addr),
+		bytes.size(), bytes.begin());
+	return address_policy::is_public_ipv6(bytes);
 }
 
 IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopToken,

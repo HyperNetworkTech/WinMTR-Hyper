@@ -1409,6 +1409,7 @@
       <TranslateIncludes Condition="'$(Configuration)|$(Platform)'=='Release Installer|x64'">true</TranslateIncludes>
     </ClCompile>
     <ClInclude Include="Resource.h" />
+    <ClInclude Include="WinMTRAddressPolicy.h" />
     <ClInclude Include="WinMTRBranding.h" />
     <ClInclude Include="WinMTRGlobal.h" />
     <ClInclude Include="WinMTRJson.h" />

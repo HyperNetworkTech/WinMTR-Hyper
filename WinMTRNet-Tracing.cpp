@@ -880,6 +880,9 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					commitCacheSkipped(slot.token.ttl, slot.token.epoch);
 					if (cached_destination) {
 						session_reached_destination = true;
+						destination_ttl = destination_ttl == 0
+							? slot.token.ttl
+							: std::min(destination_ttl, slot.token.ttl);
 						scheduler.set_last_ttl(std::max(mandatory_ttl, slot.token.ttl), now);
 					}
 					notify_changed();
@@ -979,6 +982,7 @@ void WinMTRNet::beginSession(const SOCKADDR_INET& address, std::wstring target,
 	session_options = trace_options;
 	session_start_ttl = trace_options.start_ttl;
 	display_max_ttl = 0;
+	session_destination_ttl = 0;
 	reply_sequence = 0;
 	completed_cycles = 0;
 	session_started_at_unix_ms = unix_now_ms();
@@ -1013,6 +1017,7 @@ void WinMTRNet::ResetHops() noexcept
 	reverse_dns_inflight.clear();
 	data_epoch.fetch_add(1, std::memory_order_acq_rel);
 	display_max_ttl = 0;
+	session_destination_ttl = 0;
 	reply_sequence = 0;
 	completed_cycles = 0;
 	++data_revision;
@@ -1176,6 +1181,11 @@ void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 		}
 		auto& hop = host[ttl - 1];
 		hop.noteReply(round_trip_ms, cycle, tick, outcome, status_code);
+		if (is_destination) {
+			session_destination_ttl = session_destination_ttl == 0
+				? ttl
+				: std::min(session_destination_ttl, ttl);
+		}
 		display_max_ttl = std::max(display_max_ttl,
 			std::clamp(ttl, session_start_ttl, session_options.max_hops));
 		if (is_destination) hop.last_destination_reply_tick = tick;

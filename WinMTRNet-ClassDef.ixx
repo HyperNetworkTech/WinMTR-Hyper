@@ -166,6 +166,9 @@ private:
 	std::uint64_t session_ended_tick = 0;
 	unsigned session_start_ttl = WinMTRUtils::DEFAULT_START_TTL;
 	unsigned display_max_ttl = 0;
+	// A staggered sweep can receive the target at several TTLs before the
+	// shortest one completes. Snapshots expose only the lowest known target TTL.
+	unsigned session_destination_ttl = 0;
 	WinMTRTraceOptions session_options;
 	struct responder_metadata final {
 		std::wstring name;

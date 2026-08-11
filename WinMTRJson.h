@@ -23,6 +23,7 @@ public:
 
 private:
 	static constexpr std::size_t maximum_input_bytes = 1024u * 1024u;
+	static constexpr std::size_t maximum_string_bytes = 4096u;
 	static constexpr unsigned maximum_depth = 64;
 
 	void skip_space() noexcept
@@ -94,6 +95,7 @@ private:
 			if (value < 0x20) return std::nullopt;
 			if (value != '\\') {
 				output.push_back(static_cast<char>(value));
+				if (output.size() > maximum_string_bytes) return std::nullopt;
 				continue;
 			}
 			if (position_ >= input_.size()) return std::nullopt;
@@ -128,6 +130,7 @@ private:
 			}
 			default: return std::nullopt;
 			}
+			if (output.size() > maximum_string_bytes) return std::nullopt;
 		}
 		return std::nullopt;
 	}
