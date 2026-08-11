@@ -148,7 +148,7 @@ struct parsed_reply final {
 
 void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 	const SOCKADDR_INET& destination, const WinMTRTraceOptions& options,
-	const std::vector<std::byte>& payload)
+	const std::vector<std::byte>& payload, unsigned timeout_ms)
 {
 	if (icmp_handle == nullptr || icmp_handle == INVALID_HANDLE_VALUE) {
 		probe.issue_error = ERROR_INVALID_HANDLE;
@@ -177,7 +177,7 @@ void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 			&probe.ip_options,
 			probe.reply_buffer.data(),
 			static_cast<DWORD>(probe.reply_buffer.size()),
-			options.timeout_ms);
+			timeout_ms);
 	}
 	else if (destination.si_family == AF_INET6) {
 		probe.ipv6_source = {};
@@ -194,7 +194,7 @@ void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 			&probe.ip_options,
 			probe.reply_buffer.data(),
 			static_cast<DWORD>(probe.reply_buffer.size()),
-			options.timeout_ms);
+			timeout_ms);
 	}
 	else {
 		probe.issue_error = WSAEAFNOSUPPORT;
@@ -327,6 +327,13 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 		throw;
 	}
 	const auto this_session = session_id.load(std::memory_order_acquire);
+	// These Windows ICMP calls are synchronous: a silent hop blocks its worker
+	// until Timeout expires. Cap that wait at the configured send interval so a
+	// 3-second reply timeout cannot turn a 1-second MTR cadence into 3 seconds.
+	const auto interval_timeout_ms = std::clamp<unsigned>(
+		static_cast<unsigned>(trace_options.interval_seconds * 1000.0 + 0.5),
+		WinMTRUtils::MIN_TIMEOUT_MS, WinMTRUtils::MAX_TIMEOUT_MS);
+	const unsigned probe_timeout_ms = std::min(trace_options.timeout_ms, interval_timeout_ms);
 	struct trace_guard final {
 		WinMTRNet* owner;
 		std::uint64_t session;
@@ -407,8 +414,8 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 				auto* pending = &probe;
 				const HANDLE handle = icmp_handles[probe.ttl - 1].get();
 				workers.emplace_back([this, pending, handle, &address, &trace_options, &payload,
-					cycle_serial, this_session, round_epoch] {
-					issue_probe(*pending, handle, address, trace_options, payload);
+					probe_timeout_ms, cycle_serial, this_session, round_epoch] {
+					issue_probe(*pending, handle, address, trace_options, payload, probe_timeout_ms);
 					if (!pending->issued) return;
 					const auto parsed = parse_reply(*pending, address.si_family);
 					if (is_usable_trace_reply(parsed.status) && isValidAddress(parsed.address)) {
