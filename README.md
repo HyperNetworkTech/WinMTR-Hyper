@@ -124,6 +124,7 @@ CMake 設定會拒絕 32 位元目標。專案使用靜態 MFC／CRT 的 Release
 
 發布前應至少在 Windows 7 SP1、Windows 10 與 Windows 11 的 x64 環境完成
 啟動、IPv4、IPv6、DPI 縮放、停止追蹤、剪貼簿與各匯出格式的實機驗證。
+完整的自動、簽章與 VM gate 見 [`docs/RELEASE_CHECKLIST.md`](docs/RELEASE_CHECKLIST.md)。
 
 ## 維護與自訂
 

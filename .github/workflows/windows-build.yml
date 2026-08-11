@@ -85,8 +85,23 @@ jobs:
           if (-not (Select-String -Path app.manifest -SimpleMatch 'level="asInvoker"')) {
             throw "Application manifest must remain asInvoker"
           }
+          $imports = & $dumpbin /imports Release_x64\WinMTR.exe | Out-String
+          $imports | Set-Content Release_x64\IMPORTS.txt -Encoding utf8
+          foreach ($forbidden in @('GetAddrInfoExCancel', 'GetAddrInfoExOverlappedResult')) {
+            if ($imports -match "(?m)\b$forbidden\b") {
+              throw "Windows 7 release statically imports $forbidden"
+            }
+          }
           $hash = (Get-FileHash Release_x64\WinMTR.exe -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash *WinMTR.exe" | Set-Content Release_x64\SHA256SUMS.txt -Encoding ascii
+
+      - name: Generate SPDX release SBOM
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: >-
+          pwsh -NoProfile -ExecutionPolicy Bypass -File .github/scripts/New-ReleaseSbom.ps1
+          -OutputPath Release_x64/WinMTR-Hyper.spdx.json
+          -Commit "${{ github.sha }}"
 
       - name: Upload verified release artifact
         if: matrix.configuration == 'Release'
@@ -98,6 +113,8 @@ jobs:
             Release_x64/WinMTR.exe
             Release_x64/WinMTR.pdb
             Release_x64/SHA256SUMS.txt
+            Release_x64/IMPORTS.txt
+            Release_x64/WinMTR-Hyper.spdx.json
             docs/schema/winmtr-report-v1.json
 
   address-sanitizer:
