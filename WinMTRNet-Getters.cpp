@@ -46,12 +46,20 @@ WinMTRTraceSnapshot WinMTRNet::getTraceSnapshot() const
 	snapshot.session_id = session_id.load(std::memory_order_relaxed);
 	snapshot.data_epoch = data_epoch.load(std::memory_order_relaxed);
 	snapshot.revision = data_revision;
+	snapshot.started_at_unix_ms = session_started_at_unix_ms;
+	snapshot.ended_at_unix_ms = session_ended_at_unix_ms;
 	snapshot.target = target_name;
 	snapshot.target_address = last_remote_addr;
 	snapshot.address_family = last_remote_addr.si_family;
 	snapshot.start_ttl = session_start_ttl;
 	snapshot.display_max_ttl = display_max_ttl;
 	snapshot.tracing = tracing.load(std::memory_order_relaxed);
+	const auto duration_end = snapshot.tracing
+		? GetTickCount64()
+		: session_ended_tick;
+	if (session_started_tick != 0 && duration_end >= session_started_tick) {
+		snapshot.duration_ms = duration_end - session_started_tick;
+	}
 
 	if (display_max_ttl < session_start_ttl || display_max_ttl == 0) {
 		return snapshot;

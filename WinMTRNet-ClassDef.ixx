@@ -54,6 +54,9 @@ export struct WinMTRTraceSnapshot final {
 	std::uint64_t session_id = 0;
 	std::uint64_t data_epoch = 0;
 	std::uint64_t revision = 0;
+	std::uint64_t started_at_unix_ms = 0;
+	std::uint64_t ended_at_unix_ms = 0;
+	std::uint64_t duration_ms = 0;
 	std::wstring target;
 	SOCKADDR_INET target_address = {};
 	ADDRESS_FAMILY address_family = AF_UNSPEC;
@@ -151,6 +154,10 @@ private:
 	std::uint64_t reply_sequence = 0;
 	std::uint64_t completed_cycles = 0;
 	std::uint64_t data_revision = 0;
+	std::uint64_t session_started_at_unix_ms = 0;
+	std::uint64_t session_ended_at_unix_ms = 0;
+	std::uint64_t session_started_tick = 0;
+	std::uint64_t session_ended_tick = 0;
 	unsigned session_start_ttl = WinMTRUtils::DEFAULT_START_TTL;
 	unsigned display_max_ttl = 0;
 	WinMTRTraceOptions session_options;
@@ -182,6 +189,8 @@ private:
 	void commitSchedulerSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitCacheSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitLateCompletion(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitPostDestinationCompletion(unsigned ttl,
+		std::uint64_t expected_epoch) noexcept;
 	void commitReply(unsigned ttl, const SOCKADDR_INET& responder, unsigned round_trip_ms,
 		std::uint64_t cycle, std::uint64_t tick, std::uint64_t expected_session,
 		std::uint64_t expected_epoch, WinMTRProbeOutcome outcome,

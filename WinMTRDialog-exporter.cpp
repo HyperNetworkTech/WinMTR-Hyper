@@ -53,6 +53,8 @@ namespace {
 	case WinMTRProbeOutcome::scheduler_skipped: return L"scheduler_skipped";
 	case WinMTRProbeOutcome::cached: return L"cached";
 	case WinMTRProbeOutcome::late_discarded: return L"late_discarded";
+	case WinMTRProbeOutcome::post_destination_discarded:
+		return L"post_destination_discarded";
 	}
 	return L"none";
 }
@@ -86,6 +88,20 @@ struct ExportRow final {
 	WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), result.data(), length,
 		nullptr, nullptr);
 	return result;
+}
+
+[[nodiscard]] std::wstring isoUtcTimestamp(std::uint64_t unixMilliseconds)
+{
+	if (unixMilliseconds == 0) return {};
+	constexpr std::uint64_t windowsEpochOffset = 116'444'736'000'000'000ull;
+	ULARGE_INTEGER ticks{};
+	ticks.QuadPart = windowsEpochOffset + unixMilliseconds * 10'000ull;
+	FILETIME fileTime{ ticks.LowPart, ticks.HighPart };
+	SYSTEMTIME utc{};
+	if (!FileTimeToSystemTime(&fileTime, &utc)) return {};
+	return std::format(L"{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+		utc.wYear, utc.wMonth, utc.wDay, utc.wHour, utc.wMinute, utc.wSecond,
+		utc.wMilliseconds);
 }
 
 [[nodiscard]] std::wstring primaryHost(const s_nethost& hop)
@@ -138,7 +154,13 @@ struct ExportRow final {
 	const auto headers = exportHeaders();
 	const CString targetLabel = localized(IDS_EXPORT_TARGET_LABEL);
 	std::wostringstream out;
-	out << targetLabel.GetString() << L"：" << snapshot.target << L"\r\n";
+	out << targetLabel.GetString() << L"：" << snapshot.target << L"\r\n"
+		<< L"Started UTC\t" << isoUtcTimestamp(snapshot.started_at_unix_ms) << L"\r\n"
+		<< L"Ended UTC\t";
+	if (snapshot.ended_at_unix_ms != 0) {
+		out << isoUtcTimestamp(snapshot.ended_at_unix_ms);
+	}
+	out << L"\r\nDuration (ms)\t" << snapshot.duration_ms << L"\r\n";
 	for (size_t index = 0; index < headers.size(); ++index) {
 		if (index != 0) out << L'\t';
 		out << headers[index];
@@ -186,7 +208,14 @@ struct ExportRow final {
 	}
 	out << L"<h1>" << htmlEscape(reportTitle.GetString()) << L"</h1><p>"
 		<< htmlEscape(targetLabel.GetString()) << L"：<code>" << htmlEscape(snapshot.target)
-		<< L"</code></p><table><thead><tr>";
+		<< L"</code></p><dl><dt>Started UTC</dt><dd>"
+		<< isoUtcTimestamp(snapshot.started_at_unix_ms)
+		<< L"</dd><dt>Ended UTC</dt><dd>";
+	if (snapshot.ended_at_unix_ms != 0) {
+		out << isoUtcTimestamp(snapshot.ended_at_unix_ms);
+	}
+	out << L"</dd><dt>Duration (ms)</dt><dd>" << snapshot.duration_ms
+		<< L"</dd></dl><table><thead><tr>";
 	for (const auto header : headers) out << L"<th>" << header << L"</th>";
 	out << L"</tr></thead><tbody>";
 	for (const auto& row : makeRows(snapshot)) {
@@ -215,12 +244,18 @@ struct ExportRow final {
 {
 	const auto headers = exportHeaders();
 	std::wostringstream out;
+	out << L"started_at_utc,ended_at_utc,duration_ms,";
 	for (size_t index = 0; index < headers.size(); ++index) {
 		if (index != 0) out << L',';
 		out << csvCell(headers[index]);
 	}
 	out << L"\r\n";
 	for (const auto& row : makeRows(snapshot)) {
+		out << csvCell(isoUtcTimestamp(snapshot.started_at_unix_ms)) << L',';
+		if (snapshot.ended_at_unix_ms != 0) {
+			out << csvCell(isoUtcTimestamp(snapshot.ended_at_unix_ms));
+		}
+		out << L',' << snapshot.duration_ms << L',';
 		for (size_t index = 0; index < row.cells.size(); ++index) {
 			if (index != 0) out << L',';
 			out << csvCell(row.cells[index]);
@@ -258,7 +293,14 @@ struct ExportRow final {
 		<< L"\r\n  \"statistics\": {\"loss\":\"timed_out/completed\","
 		<< L"\"stddev\":\"sample_standard_deviation\","
 		<< L"\"jitter\":\"ewma_absolute_consecutive_delta_alpha_1_16\"},"
-		<< L"\r\n  \"target\": \"" << jsonEscape(snapshot.target) << L"\",\r\n  \"hops\": [";
+		<< L"\r\n  \"target\": \"" << jsonEscape(snapshot.target) << L"\","
+		<< L"\r\n  \"started_at_utc\": \""
+		<< isoUtcTimestamp(snapshot.started_at_unix_ms) << L"\","
+		<< L"\r\n  \"ended_at_utc\": ";
+	if (snapshot.ended_at_unix_ms == 0) out << L"null";
+	else out << L'\"' << isoUtcTimestamp(snapshot.ended_at_unix_ms) << L'\"';
+	out << L",\r\n  \"duration_ms\": " << snapshot.duration_ms << L','
+		<< L"\r\n  \"hops\": [";
 	for (size_t hopIndex = 0; hopIndex < snapshot.hops.size(); ++hopIndex) {
 		const auto& hop = snapshot.hops[hopIndex];
 		if (hopIndex != 0) out << L',';
@@ -276,6 +318,8 @@ struct ExportRow final {
 			<< L"\"scheduler_skipped\":" << hop.scheduler_skipped << L','
 			<< L"\"cache_skipped\":" << hop.cache_skipped << L','
 			<< L"\"late_completions\":" << hop.late_completions << L','
+			<< L"\"post_destination_completions\":"
+			<< hop.post_destination_completions << L','
 			<< L"\"scheduler_late_slots\":" << hop.scheduler_late_slots << L','
 			<< L"\"scheduler_lateness_total_ms\":"
 			<< hop.scheduler_lateness_total_ms << L','
@@ -296,7 +340,11 @@ struct ExportRow final {
 		for (size_t responderIndex = 0; responderIndex < hop.responders.size(); ++responderIndex) {
 			const auto& responder = hop.responders[responderIndex];
 			if (responderIndex != 0) out << L',';
-			out << L"{\"host\":\"" << jsonEscape(responder.getName()) << L"\","
+			out << L"{\"id\":\"" << std::format(L"{:016x}", responder.stable_id)
+				<< L"\","
+				<< L"\"hit_count\":" << responder.hit_count << L','
+				<< L"\"last_seen_sequence\":" << responder.last_seen_sequence << L','
+				<< L"\"host\":\"" << jsonEscape(responder.getName()) << L"\","
 				<< L"\"ip\":\"" << jsonEscape(addr_to_string(responder.addr)) << L"\","
 				<< L"\"country\":\"" << jsonEscape(responder.country) << L"\","
 				<< L"\"asn\":\"" << jsonEscape(responder.asn) << L"\","

@@ -93,7 +93,9 @@ export namespace WinMTRUtils {
 	export constexpr auto MIN_PUBLIC_INFO_REFRESH_MINUTES = 1u;
 	export constexpr auto MAX_PUBLIC_INFO_REFRESH_MINUTES = 1440u;
 
-	// A periodic full-path discovery round lets a route grow again after a
-	// shorter/unknown tail was observed.  It is deliberately not user-facing.
+	// Periodically probe a small frontier beyond the stable path. This detects
+	// route growth without generating a burst across every possible TTL.
 	export constexpr auto PATH_EXPLORATION_PERIOD = 10u;
+	export constexpr auto PATH_EXPLORATION_FRONTIER_TTLS = 5u;
+	export constexpr auto PATH_SHRINK_CONFIRMATIONS = 2u;
 }

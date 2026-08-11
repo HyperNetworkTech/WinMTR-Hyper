@@ -111,6 +111,12 @@ struct parsed_reply final {
 		std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+[[nodiscard]] std::uint64_t unix_now_ms() noexcept
+{
+	return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::system_clock::now().time_since_epoch()).count());
+}
+
 [[nodiscard]] WinMTRProbeOutcome classify_probe_outcome(DWORD status) noexcept
 {
 	switch (status) {
@@ -142,6 +148,13 @@ struct parsed_reply final {
 	// timeout or a failure before the network accepted the request is excluded.
 	return outcome != WinMTRProbeOutcome::timeout
 		&& outcome != WinMTRProbeOutcome::local_error;
+}
+
+[[nodiscard]] bool is_terminal_destination_outcome(
+	WinMTRProbeOutcome outcome) noexcept
+{
+	return outcome == WinMTRProbeOutcome::echo_reply
+		|| outcome == WinMTRProbeOutcome::destination_unreachable;
 }
 
 [[nodiscard]] std::size_t reply_buffer_size(ADDRESS_FAMILY family, std::size_t request_size) noexcept
@@ -409,7 +422,7 @@ void CALLBACK probe_work_callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK
 		if (is_usable_trace_reply(request->outcome)
 			&& isValidAddress(request->parsed.address)) {
 			request->completion_kind = winmtr::probe::CompletionKind::reply;
-			request->destination_reply = request->parsed.status == IP_SUCCESS
+			request->destination_reply = is_terminal_destination_outcome(request->outcome)
 				&& same_network_address(request->parsed.address, request->destination);
 		}
 		else if (request->probe.issued
@@ -515,8 +528,12 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 	bool session_had_usable_reply = false;
 	bool stopping = false;
 	bool exploration_cycle = true;
+	bool initial_discovery = true;
 	unsigned highest_response_ttl = 0;
 	unsigned destination_ttl = 0;
+	unsigned stable_ceiling = initial_ceiling;
+	unsigned shrink_candidate = 0;
+	unsigned shrink_confirmations = 0;
 
 	const auto notify_changed = [this] {
 		if (options != nullptr) options->notifyTraceDataChanged();
@@ -540,15 +557,42 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					? std::max(mandatory_ttl, destination_ttl)
 					: std::min(trace_options.max_hops,
 						std::max(mandatory_ttl, tail_origin + trace_options.unknown_host_limit));
-				scheduler.set_last_ttl(normal_ceiling, monotonic_now());
+				if (initial_discovery) {
+					stable_ceiling = normal_ceiling;
+					initial_discovery = false;
+					shrink_candidate = 0;
+					shrink_confirmations = 0;
+				}
+				else if (normal_ceiling < stable_ceiling) {
+					if (shrink_candidate == normal_ceiling) {
+						++shrink_confirmations;
+					}
+					else {
+						shrink_candidate = normal_ceiling;
+						shrink_confirmations = 1;
+					}
+					if (shrink_confirmations >= WinMTRUtils::PATH_SHRINK_CONFIRMATIONS) {
+						stable_ceiling = normal_ceiling;
+						shrink_candidate = 0;
+						shrink_confirmations = 0;
+					}
+				}
+				else {
+					stable_ceiling = normal_ceiling;
+					shrink_candidate = 0;
+					shrink_confirmations = 0;
+				}
+				scheduler.set_last_ttl(stable_ceiling, monotonic_now());
 				exploration_cycle = false;
 			}
 			if (reported_cycles % WinMTRUtils::PATH_EXPLORATION_PERIOD == 0
-				&& scheduler.active_last_ttl() < trace_options.max_hops) {
+				&& stable_ceiling < trace_options.max_hops) {
 				exploration_cycle = true;
 				highest_response_ttl = 0;
 				destination_ttl = 0;
-				scheduler.set_last_ttl(trace_options.max_hops, monotonic_now());
+				const auto frontier_ceiling = std::min(trace_options.max_hops,
+					stable_ceiling + WinMTRUtils::PATH_EXPLORATION_FRONTIER_TTLS);
+				scheduler.set_last_ttl(frontier_ceiling, monotonic_now());
 			}
 		}
 	};
@@ -562,8 +606,12 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			session_reached_destination = false;
 			session_had_usable_reply = false;
 			exploration_cycle = true;
+			initial_discovery = true;
 			highest_response_ttl = 0;
 			destination_ttl = 0;
+			stable_ceiling = initial_ceiling;
+			shrink_candidate = 0;
+			shrink_confirmations = 0;
 			scheduler.restart(current_epoch, now);
 			scheduler.set_last_ttl(initial_ceiling, now);
 		}
@@ -573,6 +621,23 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			if (found == requests.end()) continue;
 			const auto disposition = scheduler.complete(request->token,
 				request->completion_kind, request->completed_at);
+			const auto accepted_after_destination = destination_ttl != 0
+				&& request->token.ttl > std::max(mandatory_ttl, destination_ttl)
+				&& (disposition == winmtr::probe::CompletionDisposition::accepted_reply
+					|| disposition == winmtr::probe::CompletionDisposition::accepted_timeout
+					|| disposition == winmtr::probe::CompletionDisposition::accepted_local_error
+					|| disposition
+						== winmtr::probe::CompletionDisposition::late_discarded_after_timeout);
+			if (accepted_after_destination) {
+				commitPostDestinationCompletion(request->token.ttl, request->token.epoch);
+				if (disposition
+					== winmtr::probe::CompletionDisposition::late_discarded_after_timeout) {
+					commitLateCompletion(request->token.ttl, request->token.epoch);
+				}
+				notify_changed();
+				requests.erase(found);
+				continue;
+			}
 			switch (disposition) {
 			case winmtr::probe::CompletionDisposition::accepted_reply: {
 				commitReply(request->token.ttl, request->parsed.address,
@@ -626,7 +691,13 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 		}
 		if (!stopping) {
 			for (const auto& expired : scheduler.expire(now)) {
-				commitTimeout(expired.ttl, expired.epoch);
+				if (destination_ttl != 0
+					&& expired.ttl > std::max(mandatory_ttl, destination_ttl)) {
+					commitPostDestinationCompletion(expired.ttl, expired.epoch);
+				}
+				else {
+					commitTimeout(expired.ttl, expired.epoch);
+				}
 				notify_changed();
 			}
 
@@ -733,6 +804,10 @@ void WinMTRNet::beginSession(const SOCKADDR_INET& address, std::wstring target,
 	display_max_ttl = 0;
 	reply_sequence = 0;
 	completed_cycles = 0;
+	session_started_at_unix_ms = unix_now_ms();
+	session_ended_at_unix_ms = 0;
+	session_started_tick = GetTickCount64();
+	session_ended_tick = 0;
 	++data_revision;
 	for (unsigned index = 0; index < host.size(); ++index) {
 		host[index].reset(index + 1);
@@ -741,9 +816,12 @@ void WinMTRNet::beginSession(const SOCKADDR_INET& address, std::wstring target,
 
 void WinMTRNet::finishSession(std::uint64_t expected_session) noexcept
 {
-	if (session_id.load(std::memory_order_acquire) == expected_session) {
-		tracing.store(false, std::memory_order_release);
-	}
+	std::scoped_lock lock(ghMutex);
+	if (session_id.load(std::memory_order_relaxed) != expected_session) return;
+	session_ended_at_unix_ms = unix_now_ms();
+	session_ended_tick = GetTickCount64();
+	tracing.store(false, std::memory_order_release);
+	++data_revision;
 }
 
 void WinMTRNet::ResetHops() noexcept
@@ -873,6 +951,16 @@ void WinMTRNet::commitLateCompletion(unsigned ttl,
 	std::scoped_lock lock(ghMutex);
 	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
 	host[ttl - 1].noteLateCompletion();
+	++data_revision;
+}
+
+void WinMTRNet::commitPostDestinationCompletion(unsigned ttl,
+	std::uint64_t expected_epoch) noexcept
+{
+	if (ttl == 0 || ttl > host.size()) return;
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
+	host[ttl - 1].notePostDestinationCompletion();
 	++data_revision;
 }
 

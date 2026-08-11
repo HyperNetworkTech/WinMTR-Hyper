@@ -39,6 +39,7 @@ import WinMTRUtils;
 import <algorithm>;
 import <string>;
 import <vector>;
+import <cstddef>;
 import <cstdint>;
 import <cmath>;
 import <cstring>;
@@ -62,12 +63,14 @@ inline bool same_network_address(const SOCKADDR_INET& lhs, const SOCKADDR_INET& 
 
 export struct s_netresponder final {
 	SOCKADDR_INET addr = {};
+	std::uint64_t stable_id = 0;
 	std::wstring name;
 	std::wstring country;
 	std::wstring asn;
 	std::wstring isp;
 	std::uint64_t last_seen_sequence = 0;
 	std::uint64_t last_reply_tick = 0;
+	std::uint64_t hit_count = 0;
 
 	[[nodiscard]]
 	std::wstring getName() const
@@ -89,6 +92,7 @@ export enum class WinMTRProbeOutcome : std::uint8_t {
 	scheduler_skipped,
 	cached,
 	late_discarded,
+	post_destination_discarded,
 };
 
 export struct s_nethost final {
@@ -106,6 +110,7 @@ export struct s_nethost final {
 	std::uint64_t scheduler_skipped = 0;
 	std::uint64_t cache_skipped = 0;
 	std::uint64_t late_completions = 0;
+	std::uint64_t post_destination_completions = 0;
 	std::uint64_t scheduler_late_slots = 0;
 	std::uint64_t scheduler_lateness_total_ms = 0;
 	std::uint64_t scheduler_lateness_max_ms = 0;
@@ -253,6 +258,14 @@ export struct s_nethost final {
 		last_outcome = WinMTRProbeOutcome::late_discarded;
 	}
 
+	void notePostDestinationCompletion() noexcept
+	{
+		if (in_flight != 0) --in_flight;
+		++post_destination_completions;
+		last_outcome = WinMTRProbeOutcome::post_destination_discarded;
+		last_error_code = 0;
+	}
+
 	[[nodiscard]]
 	s_netresponder& observeResponder(const SOCKADDR_INET& responder_address,
 		std::uint64_t sequence, std::uint64_t tick)
@@ -266,9 +279,16 @@ export struct s_nethost final {
 
 		if (found == responders.end()) {
 			if (responders.size() >= WinMTRUtils::MAX_ECMP_RESPONDERS) {
-				responders.pop_back();
+				const auto oldest = std::min_element(responders.begin(), responders.end(),
+					[](const auto& lhs, const auto& rhs) {
+						return lhs.last_seen_sequence < rhs.last_seen_sequence;
+					});
+				responders.erase(oldest);
 			}
-			responders.insert(responders.begin(), s_netresponder{ .addr = responder_address });
+			responders.insert(responders.begin(), s_netresponder{
+				.addr = responder_address,
+				.stable_id = stableResponderId(responder_address),
+			});
 		}
 		else if (found != responders.begin()) {
 			auto current = std::move(*found);
@@ -279,6 +299,7 @@ export struct s_nethost final {
 		auto& primary = responders.front();
 		primary.last_seen_sequence = sequence;
 		primary.last_reply_tick = tick;
+		++primary.hit_count;
 		addr = primary.addr;
 		name = primary.name;
 		country = primary.country;
@@ -286,6 +307,33 @@ export struct s_nethost final {
 		isp = primary.isp;
 		return primary;
 	}
+
+private:
+	[[nodiscard]] static std::uint64_t stableResponderId(
+		const SOCKADDR_INET& address) noexcept
+	{
+		constexpr std::uint64_t offset = 14695981039346656037ull;
+		constexpr std::uint64_t prime = 1099511628211ull;
+		std::uint64_t hash = offset;
+		const auto mix = [&hash](const void* data, std::size_t size) noexcept {
+			const auto* bytes = static_cast<const unsigned char*>(data);
+			for (std::size_t index = 0; index < size; ++index) {
+				hash ^= bytes[index];
+				hash *= prime;
+			}
+		};
+		mix(&address.si_family, sizeof(address.si_family));
+		if (address.si_family == AF_INET) {
+			mix(&address.Ipv4.sin_addr, sizeof(address.Ipv4.sin_addr));
+		}
+		else if (address.si_family == AF_INET6) {
+			mix(&address.Ipv6.sin6_addr, sizeof(address.Ipv6.sin6_addr));
+			mix(&address.Ipv6.sin6_scope_id, sizeof(address.Ipv6.sin6_scope_id));
+		}
+		return hash == 0 ? 1 : hash;
+	}
+
+public:
 
 	bool updateResponder(const SOCKADDR_INET& responder_address,
 		const std::wstring& responder_name,
