@@ -114,3 +114,24 @@ target_link_libraries(WinMTR PRIVATE
     winspool
     ws2_32
 )
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(WinMTRCoreTests
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/ProbeSchedulerTests.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/WinMTRProbeScheduler.h"
+    )
+    target_include_directories(WinMTRCoreTests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_compile_features(WinMTRCoreTests PRIVATE cxx_std_23)
+    target_compile_options(WinMTRCoreTests PRIVATE
+        /utf-8
+        /permissive-
+        /Zc:__cplusplus
+    )
+    set_property(TARGET WinMTRCoreTests PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+    add_test(NAME probe_scheduler COMMAND WinMTRCoreTests)
+endif()
