@@ -108,6 +108,7 @@ target_link_libraries(WinMTR PRIVATE
     gdiplus
     iphlpapi
     msimg32
+    normaliz
     ole32
     oleaut32
     shell32

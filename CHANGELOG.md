@@ -22,6 +22,8 @@
 - JSON schema v1 加入 session、outcome、公式與排程診斷；CSV 加入 session/row/IP
   metadata 與公式注入防護；所有檔案改為原子替換並回報 Win32 錯誤。
 - CLI 補齊 GUI 追蹤選項並嚴格驗證；解析錯誤使用 process exit code 2。
+- 目標 DNS 解析加入 5 秒 deadline 與取消；雙棧 A/AAAA 候選以 IPv4 優先、
+  250 ms 交錯的 bounded 平行探測選出實際可用位址，不再逐一跑完整首輪路徑。
 
 ### Quality
 

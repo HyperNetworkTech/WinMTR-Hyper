@@ -110,6 +110,8 @@ public:
 	// and calls this method from that worker, so no Windows Runtime is required.
 	[[nodiscard]] WinMTRTraceResult DoTrace(std::stop_token stop_token, SOCKADDR_INET address,
 		std::wstring target = {}, bool stop_after_unreached_first_round = false);
+	[[nodiscard]] std::optional<SOCKADDR_INET> SelectCandidate(std::stop_token stop_token,
+		const std::vector<SOCKADDR_INET>& candidates) const;
 
 	void ResetHops() noexcept;
 	[[nodiscard]]

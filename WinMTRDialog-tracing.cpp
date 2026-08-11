@@ -14,9 +14,8 @@ module;
 module WinMTR.Dialog:tracing;
 
 import :ClassDef;
-import <algorithm>;
+import <cstddef>;
 import <mutex>;
-import <optional>;
 import <string>;
 import <vector>;
 import WinMTRDnsUtil;
@@ -44,6 +43,7 @@ void WinMTRDialog::pingThread(std::stop_token stopToken, std::wstring host,
 	std::uint64_t generation) noexcept
 {
 	std::vector<SOCKADDR_INET> candidates;
+	int resolutionError = WSAHOST_NOT_FOUND;
 	for (const auto family : { AF_INET, AF_INET6 }) {
 		if ((family == AF_INET && !useIPv4.load()) || (family == AF_INET6 && !useIPv6.load())) continue;
 		SOCKADDR_INET selected{};
@@ -60,61 +60,39 @@ void WinMTRDialog::pingThread(std::stop_token stopToken, std::wstring host,
 		int family = AF_UNSPEC;
 		if (!useIPv4.load()) family = AF_INET6;
 		else if (!useIPv6.load()) family = AF_INET;
-		const auto addresses = ResolveAddresses(host, family);
-		// Prefer IPv4 when both are enabled, then transparently fall back to an
-		// IPv6 (or another resolved) address if a complete first path cycle gets
-		// no ICMP response at all.  This tests actual trace usability instead of
-		// trusting resolver order alone.
-		for (const auto preferredFamily : { AF_INET, AF_INET6 }) {
-			for (const auto& address : addresses) {
-				if (address.si_family != preferredFamily
-					|| (preferredFamily == AF_INET && !useIPv4.load())
-					|| (preferredFamily == AF_INET6 && !useIPv6.load())) continue;
-				const bool duplicate = std::any_of(candidates.begin(), candidates.end(),
-					[&](const SOCKADDR_INET& existing) {
-						return same_network_address(existing, address);
-					});
-				if (!duplicate) candidates.push_back(address);
-				if (candidates.size() >= 8) break;
-			}
-			if (candidates.size() >= 8) break;
+		const auto resolution = ResolveAddressesWithDeadline(host, family, stopToken);
+		resolutionError = resolution.error_code;
+		std::vector<SOCKADDR_INET> ipv4;
+		std::vector<SOCKADDR_INET> ipv6;
+		for (const auto& address : resolution.addresses) {
+			if (address.si_family == AF_INET && useIPv4.load()) ipv4.push_back(address);
+			else if (address.si_family == AF_INET6 && useIPv6.load()) ipv6.push_back(address);
+		}
+		// Start with IPv4 for compatibility, but interleave the families so the
+		// 250 ms candidate race does not make all AAAA records wait behind every A.
+		for (std::size_t index = 0; candidates.size() < 8
+			&& (index < ipv4.size() || index < ipv6.size()); ++index) {
+			if (index < ipv4.size()) candidates.push_back(ipv4[index]);
+			if (candidates.size() < 8 && index < ipv6.size()) candidates.push_back(ipv6[index]);
 		}
 	}
 
 	if (candidates.empty() || stopToken.stop_requested()) {
 		tracing.store(false, std::memory_order_release);
 		PostMessageW(messageTraceFinished, static_cast<WPARAM>(generation),
-			candidates.empty() ? WSAHOST_NOT_FOUND : ERROR_CANCELLED);
+			stopToken.stop_requested() ? ERROR_CANCELLED : resolutionError);
 		return;
 	}
 
 	try {
-		if (candidates.size() == 1) {
-			[[maybe_unused]] const auto result = wmtrnet->DoTrace(
-				stopToken, candidates.front(), host, false);
+		const auto selectedCandidate = wmtrnet->SelectCandidate(stopToken, candidates);
+		if (!selectedCandidate) {
+			tracing.store(false, std::memory_order_release);
+			PostMessageW(messageTraceFinished, static_cast<WPARAM>(generation), ERROR_CANCELLED);
+			return;
 		}
-		else {
-			std::optional<SOCKADDR_INET> firstUsableCandidate;
-			bool selected = false;
-			for (const auto& candidate : candidates) {
-				if (stopToken.stop_requested()) break;
-				const auto result = wmtrnet->DoTrace(stopToken, candidate, host, true);
-				if (result == WinMTRTraceResult::destination) {
-					selected = true;
-					break;
-				}
-				if (result == WinMTRTraceResult::reply && !firstUsableCandidate) {
-					firstUsableCandidate = candidate;
-				}
-			}
-			if (!selected && !stopToken.stop_requested()) {
-				// Prefer a family that produced any usable ICMP path response.  If
-				// every first-cycle attempt was silent, retain resolver preference.
-				const auto selectedCandidate = firstUsableCandidate.value_or(candidates.front());
-				[[maybe_unused]] const auto result = wmtrnet->DoTrace(
-					stopToken, selectedCandidate, host, false);
-			}
-		}
+		[[maybe_unused]] const auto result = wmtrnet->DoTrace(
+			stopToken, *selectedCandidate, host, false);
 	}
 	catch (...) {
 		tracing.store(false, std::memory_order_release);

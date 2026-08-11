@@ -40,6 +40,7 @@ import <iterator>;
 import <limits>;
 import <memory>;
 import <mutex>;
+import <optional>;
 import <string>;
 import <system_error>;
 import <thread>;
@@ -307,6 +308,30 @@ void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 	return parsed;
 }
 
+[[nodiscard]] bool probe_candidate_once(std::stop_token stop_token,
+	const SOCKADDR_INET& candidate, const WinMTRTraceOptions& options,
+	DWORD timeout_ms) noexcept
+{
+	if (stop_token.stop_requested()) return false;
+	try {
+		auto handle = create_icmp_handle(candidate.si_family);
+		if (!handle) return false;
+		pending_probe probe;
+		probe.ttl = 1;
+		std::uint64_t random_state = GetTickCount64()
+			^ static_cast<std::uint64_t>(candidate.si_family);
+		const auto payload = make_payload(options, random_state);
+		issue_probe(probe, handle.get(), candidate, options, payload, timeout_ms);
+		if (stop_token.stop_requested()) return false;
+		const auto parsed = parse_reply(probe, candidate.si_family);
+		return is_usable_trace_reply(classify_probe_outcome(parsed.status))
+			&& isValidAddress(parsed.address);
+	}
+	catch (...) {
+		return false;
+	}
+}
+
 struct probe_completion_queue;
 
 struct scheduled_probe final : std::enable_shared_from_this<scheduled_probe> {
@@ -454,6 +479,64 @@ WinMTRNet::~WinMTRNet() noexcept
 	for (auto& worker : metadata_workers) worker.request_stop();
 	metadata_queue_changed.notify_all();
 	metadata_workers.clear();
+}
+
+std::optional<SOCKADDR_INET> WinMTRNet::SelectCandidate(std::stop_token stop_token,
+	const std::vector<SOCKADDR_INET>& candidates) const
+{
+	if (candidates.empty() || stop_token.stop_requested()) return std::nullopt;
+	if (candidates.size() == 1) return candidates.front();
+
+	const auto trace_options = options != nullptr
+		? options->snapshotTraceOptions()
+		: WinMTRTraceOptions{};
+	const auto timeout_ms = static_cast<DWORD>(std::clamp(
+		trace_options.timeout_ms, 250u, 1'500u));
+	std::mutex result_mutex;
+	std::condition_variable result_changed;
+	std::optional<std::size_t> winner;
+	bool aborted = false;
+	std::vector<std::jthread> workers;
+	workers.reserve(candidates.size());
+	std::stop_callback external_stop(stop_token, [&] { result_changed.notify_all(); });
+
+	try {
+		for (std::size_t index = 0; index < candidates.size(); ++index) {
+			workers.emplace_back([&, index] {
+				const auto start_at = std::chrono::steady_clock::now()
+					+ std::chrono::milliseconds{ static_cast<long long>(index) * 250 };
+				{
+					std::unique_lock lock(result_mutex);
+					(void)result_changed.wait_until(lock, start_at, [&] {
+						return stop_token.stop_requested() || aborted || winner.has_value();
+					});
+					if (stop_token.stop_requested() || aborted || winner.has_value()) return;
+				}
+				if (!probe_candidate_once(stop_token, candidates[index], trace_options,
+					timeout_ms)) return;
+				{
+					std::scoped_lock lock(result_mutex);
+					if (!winner) winner = index;
+				}
+				result_changed.notify_all();
+			});
+		}
+	}
+	catch (...) {
+		{
+			std::scoped_lock lock(result_mutex);
+			aborted = true;
+		}
+		for (auto& worker : workers) worker.request_stop();
+		result_changed.notify_all();
+	}
+
+	for (auto& worker : workers) {
+		if (worker.joinable()) worker.join();
+	}
+	if (stop_token.stop_requested()) return std::nullopt;
+	return winner ? std::optional<SOCKADDR_INET>{ candidates[*winner] }
+		: std::optional<SOCKADDR_INET>{ candidates.front() };
 }
 
 void WinMTRNet::startMetadataWorkers()
