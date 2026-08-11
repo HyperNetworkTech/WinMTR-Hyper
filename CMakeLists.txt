@@ -147,4 +147,30 @@ if(BUILD_TESTING)
         target_link_options(WinMTRCoreTests PRIVATE /fsanitize=address)
     endif()
     add_test(NAME probe_scheduler COMMAND WinMTRCoreTests)
+
+    # The scheduled ASAN job intentionally builds only the pure core target.
+    # Normal Debug/Release CI also exercises the real unprivileged Windows
+    # ICMP API against loopback without depending on public network access.
+    if(NOT WINMTR_ENABLE_ASAN)
+        add_executable(WinMTRIcmpLoopbackTests
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/WindowsIcmpLoopbackTests.cpp"
+        )
+        target_include_directories(WinMTRIcmpLoopbackTests PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+        )
+        target_compile_features(WinMTRIcmpLoopbackTests PRIVATE cxx_std_23)
+        target_compile_options(WinMTRIcmpLoopbackTests PRIVATE
+            /utf-8
+            /W4
+            /WX
+            /sdl
+            /permissive-
+            /Zc:__cplusplus
+        )
+        set_property(TARGET WinMTRIcmpLoopbackTests PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        )
+        target_link_libraries(WinMTRIcmpLoopbackTests PRIVATE iphlpapi ws2_32)
+        add_test(NAME icmp_loopback COMMAND WinMTRIcmpLoopbackTests)
+    endif()
 endif()
