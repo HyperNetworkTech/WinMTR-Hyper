@@ -12,6 +12,7 @@ of the License.
 module;
 #pragma warning (disable : 4005)
 #include "targetver.h"
+#include "WinMTRRoutePolicy.h"
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
 #define NOMCX
@@ -670,6 +671,15 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 	auto now = monotonic_now();
 	scheduler.start(this_session, current_epoch, now);
 	const auto mandatory_ttl = std::max(trace_options.start_ttl, trace_options.minimum_ttl);
+	winmtr::route::RoutePolicy route_policy({
+		.start_ttl = trace_options.start_ttl,
+		.minimum_ttl = trace_options.minimum_ttl,
+		.max_hops = trace_options.max_hops,
+		.unknown_host_limit = trace_options.unknown_host_limit,
+		.exploration_period = WinMTRUtils::PATH_EXPLORATION_PERIOD,
+		.exploration_frontier_ttls = WinMTRUtils::PATH_EXPLORATION_FRONTIER_TTLS,
+		.shrink_confirmations = WinMTRUtils::PATH_SHRINK_CONFIRMATIONS,
+	});
 	// The first path discovery is complete but staggered over one interval.  A
 	// full initial sweep avoids hiding a destination behind an early run of
 	// silent routers; subsequent cycles use the configured unknown tail.
@@ -682,13 +692,6 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 	bool session_had_usable_reply = false;
 	bool stopping = false;
 	std::optional<winmtr::probe::MonotonicMilliseconds> drain_deadline;
-	bool exploration_cycle = true;
-	bool initial_discovery = true;
-	unsigned highest_response_ttl = 0;
-	unsigned destination_ttl = 0;
-	unsigned stable_ceiling = initial_ceiling;
-	unsigned shrink_candidate = 0;
-	unsigned shrink_confirmations = 0;
 
 	const auto notify_changed = [this] {
 		if (options != nullptr) options->notifyTraceDataChanged();
@@ -704,50 +707,8 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			&& minimum > reported_cycles) {
 			reported_cycles = minimum;
 			setCompletedCycles(reported_cycles, current_epoch);
-			if (exploration_cycle) {
-				const auto tail_origin = highest_response_ttl == 0
-					? trace_options.start_ttl - 1u
-					: highest_response_ttl;
-				const auto normal_ceiling = destination_ttl != 0
-					? std::max(mandatory_ttl, destination_ttl)
-					: std::min(trace_options.max_hops,
-						std::max(mandatory_ttl, tail_origin + trace_options.unknown_host_limit));
-				if (initial_discovery) {
-					stable_ceiling = normal_ceiling;
-					initial_discovery = false;
-					shrink_candidate = 0;
-					shrink_confirmations = 0;
-				}
-				else if (normal_ceiling < stable_ceiling) {
-					if (shrink_candidate == normal_ceiling) {
-						++shrink_confirmations;
-					}
-					else {
-						shrink_candidate = normal_ceiling;
-						shrink_confirmations = 1;
-					}
-					if (shrink_confirmations >= WinMTRUtils::PATH_SHRINK_CONFIRMATIONS) {
-						stable_ceiling = normal_ceiling;
-						shrink_candidate = 0;
-						shrink_confirmations = 0;
-					}
-				}
-				else {
-					stable_ceiling = normal_ceiling;
-					shrink_candidate = 0;
-					shrink_confirmations = 0;
-				}
-				scheduler.set_last_ttl(stable_ceiling, monotonic_now());
-				exploration_cycle = false;
-			}
-			if (reported_cycles % WinMTRUtils::PATH_EXPLORATION_PERIOD == 0
-				&& stable_ceiling < trace_options.max_hops) {
-				exploration_cycle = true;
-				highest_response_ttl = 0;
-				destination_ttl = 0;
-				const auto frontier_ceiling = std::min(trace_options.max_hops,
-					stable_ceiling + WinMTRUtils::PATH_EXPLORATION_FRONTIER_TTLS);
-				scheduler.set_last_ttl(frontier_ceiling, monotonic_now());
+			if (const auto ceiling = route_policy.complete_cycle(reported_cycles)) {
+				scheduler.set_last_ttl(*ceiling, monotonic_now());
 			}
 		}
 	};
@@ -760,13 +721,7 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			reported_cycles = 0;
 			session_reached_destination = false;
 			session_had_usable_reply = false;
-			exploration_cycle = true;
-			initial_discovery = true;
-			highest_response_ttl = 0;
-			destination_ttl = 0;
-			stable_ceiling = initial_ceiling;
-			shrink_candidate = 0;
-			shrink_confirmations = 0;
+			route_policy.reset();
 			scheduler.restart(current_epoch, now);
 			scheduler.set_last_ttl(initial_ceiling, now);
 		}
@@ -776,8 +731,8 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			if (found == requests.end()) continue;
 			const auto disposition = scheduler.complete(request->token,
 				request->completion_kind, request->completed_at);
-			const auto accepted_after_destination = destination_ttl != 0
-				&& request->token.ttl > std::max(mandatory_ttl, destination_ttl)
+			const auto accepted_after_destination = route_policy.destination_ttl() != 0
+				&& request->token.ttl > std::max(mandatory_ttl, route_policy.destination_ttl())
 				&& (disposition == winmtr::probe::CompletionDisposition::accepted_reply
 					|| disposition == winmtr::probe::CompletionDisposition::accepted_timeout
 					|| disposition == winmtr::probe::CompletionDisposition::accepted_local_error
@@ -802,12 +757,9 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					trace_options.resolve_hostnames,
 					trace_options.lookup_asn_isp);
 				session_had_usable_reply = true;
-				highest_response_ttl = std::max(highest_response_ttl, request->token.ttl);
+				route_policy.note_reply(request->token.ttl, request->destination_reply);
 				if (request->destination_reply) {
 					session_reached_destination = true;
-					destination_ttl = destination_ttl == 0
-						? request->token.ttl
-						: std::min(destination_ttl, request->token.ttl);
 					scheduler.set_last_ttl(std::max(mandatory_ttl, request->token.ttl), now);
 				}
 				notify_changed();
@@ -847,8 +799,8 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			drain_deadline = now + trace_options.grace_ms;
 		}
 		for (const auto& expired : scheduler.expire(now)) {
-			if (destination_ttl != 0
-				&& expired.ttl > std::max(mandatory_ttl, destination_ttl)) {
+			if (route_policy.destination_ttl() != 0
+				&& expired.ttl > std::max(mandatory_ttl, route_policy.destination_ttl())) {
 				commitPostDestinationCompletion(expired.ttl, expired.epoch);
 			}
 			else {
@@ -880,9 +832,7 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					commitCacheSkipped(slot.token.ttl, slot.token.epoch);
 					if (cached_destination) {
 						session_reached_destination = true;
-						destination_ttl = destination_ttl == 0
-							? slot.token.ttl
-							: std::min(destination_ttl, slot.token.ttl);
+						route_policy.note_reply(slot.token.ttl, true);
 						scheduler.set_last_ttl(std::max(mandatory_ttl, slot.token.ttl), now);
 					}
 					notify_changed();

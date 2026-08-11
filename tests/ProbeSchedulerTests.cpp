@@ -2,6 +2,7 @@
 #include "WinMTRAddressPolicy.h"
 #include "WinMTRJson.h"
 #include "WinMTRSerialization.h"
+#include "WinMTRRoutePolicy.h"
 
 #include <array>
 #include <cmath>
@@ -393,6 +394,53 @@ void test_deterministic_scheduler_resource_budget()
 		"resource budget scheduler starved a TTL");
 }
 
+void test_route_policy_scripted_changes()
+{
+	using winmtr::route::RoutePolicy;
+	using winmtr::route::RoutePolicyConfig;
+	RoutePolicy policy(RoutePolicyConfig{
+		.start_ttl = 1,
+		.minimum_ttl = 0,
+		.max_hops = 30,
+		.unknown_host_limit = 12,
+		.exploration_period = 10,
+		.exploration_frontier_ttls = 5,
+		.shrink_confirmations = 2,
+	});
+
+	policy.note_reply(8, true);
+	require(policy.complete_cycle(1) == 8u && policy.stable_ceiling() == 8u,
+		"initial destination did not establish the route ceiling");
+	require(policy.complete_cycle(10) == 13u && policy.exploring(),
+		"periodic frontier did not extend five TTLs");
+	policy.note_reply(12, true);
+	require(policy.complete_cycle(11) == 12u && policy.stable_ceiling() == 12u,
+		"longer route was not adopted after frontier discovery");
+
+	require(policy.complete_cycle(20) == 17u, "second frontier was not scheduled");
+	policy.note_reply(6, true);
+	require(policy.complete_cycle(21) == 12u && policy.stable_ceiling() == 12u,
+		"route shrank without the required hysteresis confirmation");
+	require(policy.complete_cycle(30) == 17u, "shrink confirmation frontier was not scheduled");
+	policy.note_reply(6, true);
+	require(policy.complete_cycle(31) == 6u && policy.stable_ceiling() == 6u,
+		"confirmed shorter route was not adopted");
+
+	policy.reset();
+	policy.note_reply(8, false);
+	require(policy.complete_cycle(1) == 20u,
+		"silent destination did not retain the configured unknown tail");
+
+	RoutePolicy minimumPolicy(RoutePolicyConfig{
+		.start_ttl = 1, .minimum_ttl = 15, .max_hops = 30,
+		.unknown_host_limit = 5, .exploration_period = 10,
+		.exploration_frontier_ttls = 5, .shrink_confirmations = 2,
+	});
+	minimumPolicy.note_reply(6, true);
+	require(minimumPolicy.complete_cycle(1) == 15u,
+		"minimum TTL was not enforced after an early destination");
+}
+
 void fuzz_json_parser_offline()
 {
 	std::uint64_t state = 0x243f6a8885a308d3ull;
@@ -428,6 +476,7 @@ int main()
 		test_global_rate_limit_is_fair();
 		test_grace_cancellation_is_not_loss();
 		test_deterministic_scheduler_resource_budget();
+		test_route_policy_scripted_changes();
 		fuzz_json_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;

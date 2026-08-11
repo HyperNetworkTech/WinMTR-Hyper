@@ -1416,6 +1416,7 @@
     <ClInclude Include="WinMTRMain.h" />
     <ClInclude Include="WinMTRNetworkData.h" />
     <ClInclude Include="WinMTRProperties.h" />
+    <ClInclude Include="WinMTRRoutePolicy.h" />
     <ClInclude Include="WinMTRSerialization.h" />
     <ClCompile Include="WinMTRUtils.ixx">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
