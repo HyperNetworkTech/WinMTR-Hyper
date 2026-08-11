@@ -18,6 +18,8 @@ WinMTR.exe [選項] ["目標主機"]
 | `--max-hops VALUE` | 1–64 TTL | 30 |
 | `--timeout VALUE` | 100–10000 ms | 3000 |
 | `--cycles VALUE` | 0–100000；0 表示持續 | 0 |
+| `--grace VALUE` | 0–30000 ms；停止新發送後的 drain 上限 | 5000 |
+| `--max-pps VALUE` | 1–1000 封包／秒；全 session 硬上限 | 100 |
 | `--tos VALUE` | 0–255 raw ToS/DS byte | 0 |
 | `--pattern VALUE` | 0–255，或 `random` | 32 |
 | `--start-ttl VALUE` | 1–64，且不得大於 max hops | 1 |

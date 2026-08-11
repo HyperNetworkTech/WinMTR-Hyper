@@ -55,6 +55,7 @@ using winmtr::serialization::jsonEscape;
 	case WinMTRProbeOutcome::icmp_error: return L"icmp_error";
 	case WinMTRProbeOutcome::timeout: return L"timeout";
 	case WinMTRProbeOutcome::local_error: return L"local_error";
+	case WinMTRProbeOutcome::cancelled: return L"cancelled";
 	case WinMTRProbeOutcome::scheduler_skipped: return L"scheduler_skipped";
 	case WinMTRProbeOutcome::cached: return L"cached";
 	case WinMTRProbeOutcome::late_discarded: return L"late_discarded";
@@ -300,6 +301,7 @@ struct ExportRow final {
 			<< L"\"timed_out\":" << hop.timed_out << L','
 			<< L"\"in_flight\":" << hop.in_flight << L','
 			<< L"\"local_errors\":" << hop.local_errors << L','
+			<< L"\"cancelled\":" << hop.cancelled << L','
 			<< L"\"scheduler_skipped\":" << hop.scheduler_skipped << L','
 			<< L"\"cache_skipped\":" << hop.cache_skipped << L','
 			<< L"\"late_completions\":" << hop.late_completions << L','

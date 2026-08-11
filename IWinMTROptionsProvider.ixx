@@ -30,6 +30,8 @@ export struct WinMTRTraceOptions final {
 	unsigned max_hops = WinMTRUtils::DEFAULT_MAX_HOPS;
 	unsigned timeout_ms = WinMTRUtils::DEFAULT_TIMEOUT_MS;
 	unsigned cycles = WinMTRUtils::DEFAULT_CYCLES;
+	unsigned grace_ms = WinMTRUtils::DEFAULT_GRACE_MS;
+	unsigned max_global_pps = WinMTRUtils::DEFAULT_MAX_GLOBAL_PPS;
 	unsigned tos = WinMTRUtils::DEFAULT_TOS;
 	int payload_pattern = WinMTRUtils::DEFAULT_PAYLOAD_PATTERN;
 	unsigned start_ttl = WinMTRUtils::DEFAULT_START_TTL;
@@ -58,6 +60,8 @@ export struct __declspec(novtable) IWinMTROptionsProvider {
 	virtual unsigned getMaxHops() const noexcept { return WinMTRUtils::DEFAULT_MAX_HOPS; }
 	virtual unsigned getTimeoutMs() const noexcept { return WinMTRUtils::DEFAULT_TIMEOUT_MS; }
 	virtual unsigned getCycles() const noexcept { return WinMTRUtils::DEFAULT_CYCLES; }
+	virtual unsigned getGraceMs() const noexcept { return WinMTRUtils::DEFAULT_GRACE_MS; }
+	virtual unsigned getMaxGlobalPps() const noexcept { return WinMTRUtils::DEFAULT_MAX_GLOBAL_PPS; }
 	virtual unsigned getTos() const noexcept { return WinMTRUtils::DEFAULT_TOS; }
 	virtual int getPayloadPattern() const noexcept { return WinMTRUtils::DEFAULT_PAYLOAD_PATTERN; }
 	virtual unsigned getStartTtl() const noexcept { return WinMTRUtils::DEFAULT_START_TTL; }
@@ -86,6 +90,10 @@ export struct __declspec(novtable) IWinMTROptionsProvider {
 		value.max_hops = std::clamp(getMaxHops(), WinMTRUtils::MIN_MAX_HOPS, WinMTRUtils::MAX_MAX_HOPS);
 		value.timeout_ms = std::clamp(getTimeoutMs(), WinMTRUtils::MIN_TIMEOUT_MS, WinMTRUtils::MAX_TIMEOUT_MS);
 		value.cycles = std::clamp(getCycles(), WinMTRUtils::MIN_CYCLES, WinMTRUtils::MAX_CYCLES);
+		value.grace_ms = std::clamp(getGraceMs(), WinMTRUtils::MIN_GRACE_MS,
+			WinMTRUtils::MAX_GRACE_MS);
+		value.max_global_pps = std::clamp(getMaxGlobalPps(),
+			WinMTRUtils::MIN_MAX_GLOBAL_PPS, WinMTRUtils::MAX_MAX_GLOBAL_PPS);
 		value.tos = std::clamp(getTos(), WinMTRUtils::MIN_TOS, WinMTRUtils::MAX_TOS);
 		value.payload_pattern = std::clamp(getPayloadPattern(), WinMTRUtils::MIN_PAYLOAD_PATTERN, WinMTRUtils::MAX_PAYLOAD_PATTERN);
 		value.start_ttl = std::clamp(getStartTtl(), WinMTRUtils::MIN_START_TTL, value.max_hops);

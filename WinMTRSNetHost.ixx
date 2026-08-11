@@ -91,6 +91,7 @@ export enum class WinMTRProbeOutcome : std::uint8_t {
 	icmp_error,
 	timeout,
 	local_error,
+	cancelled,
 	scheduler_skipped,
 	cached,
 	late_discarded,
@@ -111,6 +112,7 @@ export struct s_nethost final {
 	std::uint64_t timed_out = 0;	// logical network deadlines reached
 	std::uint64_t in_flight = 0;	// issued but not logically completed
 	std::uint64_t local_errors = 0;
+	std::uint64_t cancelled = 0;
 	std::uint64_t scheduler_skipped = 0;
 	std::uint64_t cache_skipped = 0;
 	std::uint64_t late_completions = 0;
@@ -240,6 +242,14 @@ export struct s_nethost final {
 		if (was_issued && in_flight != 0) --in_flight;
 		last_outcome = WinMTRProbeOutcome::local_error;
 		last_error_code = error_code;
+	}
+
+	void noteCancelled() noexcept
+	{
+		++cancelled;
+		if (in_flight != 0) --in_flight;
+		last_outcome = WinMTRProbeOutcome::cancelled;
+		last_error_code = ERROR_CANCELLED;
 	}
 
 	void noteSchedulerSkipped() noexcept

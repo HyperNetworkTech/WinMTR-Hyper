@@ -120,6 +120,8 @@
 #define IDC_EDIT_UNKNOWN_LIMIT                  1110
 #define IDC_EDIT_ECMP_LIMIT                     1111
 #define IDC_EDIT_REPLY_CACHE_SECONDS            1112
+#define IDC_EDIT_GRACE_MS                       1113
+#define IDC_EDIT_MAX_GLOBAL_PPS                 1114
 #define IDC_CHECK_RESOLVE_NAMES                 1120
 #define IDC_CHECK_LOOKUP_ASN_ISP                1121
 #define IDC_CHECK_DONT_FRAGMENT                 1122
@@ -150,6 +152,8 @@
 #define IDC_OPTIONS_GROUP_NETWORK               1153
 #define IDC_OPTIONS_LABEL_PUBLIC_REFRESH        1154
 #define IDC_OPTIONS_LABEL_PUBLIC_REFRESH_MINUTES 1155
+#define IDC_OPTIONS_LABEL_GRACE                 1156
+#define IDC_OPTIONS_LABEL_MAX_GLOBAL_PPS        1157
 
 // Node properties dialog controls (1200-1299)
 #define IDC_EDIT_PHOST                          1200

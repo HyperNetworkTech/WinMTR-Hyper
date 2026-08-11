@@ -2,10 +2,13 @@
 #include "WinMTRJson.h"
 #include "WinMTRSerialization.h"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <numeric>
+#include <ranges>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -273,6 +276,56 @@ void test_serialization_security_and_unicode()
 		"unpaired UTF-16 surrogate was not replaced deterministically");
 }
 
+void test_global_rate_limit_is_fair()
+{
+	auto config = standard_config(4);
+	config.interval_ms = 100;
+	config.timeout_ms = 1'000;
+	config.max_global_pps = 10;
+	ProbeScheduler scheduler(config);
+	scheduler.start(1, 1, 0);
+	std::array<std::uint64_t, 4> sent{};
+	for (MonotonicMilliseconds now = 0; now < 1'000; ++now) {
+		auto due = scheduler.reserve_due(now);
+		for (const auto& slot : due.slots) {
+			require(scheduler.mark_issued(slot.token, now), "rate-limited slot was not issued");
+			++sent[slot.token.ttl - 1];
+			require(scheduler.complete(slot.token, CompletionKind::reply, now)
+				== CompletionDisposition::accepted_reply,
+				"rate-limited completion was rejected");
+		}
+	}
+	const auto total = std::accumulate(sent.begin(), sent.end(), std::uint64_t{ 0 });
+	require(total == 10, "global 10 pps cap did not produce exactly ten slots in one second");
+	require(std::ranges::all_of(sent, [](std::uint64_t value) { return value >= 2; }),
+		"oldest-due scheduling starved a TTL under the global cap");
+}
+
+void test_grace_cancellation_is_not_loss()
+{
+	auto config = standard_config(1);
+	ProbeScheduler scheduler(config);
+	scheduler.start(7, 9, 0);
+	auto due = scheduler.reserve_due(0);
+	require(due.slots.size() == 1, "grace test did not reserve a probe");
+	const auto token = due.slots.front().token;
+	require(scheduler.mark_issued(token, 0), "grace test did not issue a probe");
+	scheduler.begin_drain();
+	require(scheduler.reserve_due(1'000).slots.empty(), "draining scheduler emitted a new probe");
+	const auto cancelled = scheduler.cancel_pending();
+	require(cancelled.size() == 1 && cancelled.front() == token,
+		"grace expiry did not return the pending token");
+	const auto& counters = scheduler.counters(1);
+	require(counters.cancelled == 1 && counters.in_flight == 0
+		&& counters.completed == 0 && counters.timed_out == 0,
+		"cancelled probe changed network-loss counters");
+	require(scheduler.complete(token, CompletionKind::reply, 2'000)
+		== CompletionDisposition::cancelled,
+		"transport completion after cancellation was not cleanup-only");
+	require(scheduler.transport_outstanding() == 0,
+		"cancelled transport resource was not retired");
+}
+
 void fuzz_json_parser_offline()
 {
 	std::uint64_t state = 0x243f6a8885a308d3ull;
@@ -304,6 +357,8 @@ int main()
 		test_start_stop_late_completion_race_10_000_times();
 		test_json_string_parser_boundaries();
 		test_serialization_security_and_unicode();
+		test_global_rate_limit_is_fair();
+		test_grace_cancellation_is_not_loss();
 		fuzz_json_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;

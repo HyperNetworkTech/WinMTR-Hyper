@@ -17,10 +17,10 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def exact_keys(value: dict[str, object], required: set[str], name: str) -> None:
+def exact_keys(value: dict[str, object], required: set[str], allowed: set[str], name: str) -> None:
     keys = set(value)
     require(required <= keys, f"{name} is missing {sorted(required - keys)}")
-    require(keys <= required, f"{name} has undocumented fields {sorted(keys - required)}")
+    require(keys <= allowed, f"{name} has undocumented fields {sorted(keys - allowed)}")
 
 
 def nonnegative_integer(value: object, name: str) -> None:
@@ -38,9 +38,12 @@ def main() -> None:
     required_root = set(schema["required"])
     required_hop = set(schema["$defs"]["hop"]["required"])
     required_responder = set(schema["$defs"]["responder"]["required"])
+    allowed_root = set(schema["properties"])
+    allowed_hop = set(schema["$defs"]["hop"]["properties"])
+    allowed_responder = set(schema["$defs"]["responder"]["properties"])
     outcomes = set(schema["$defs"]["hop"]["properties"]["last_outcome"]["enum"])
 
-    exact_keys(report, required_root, "report")
+    exact_keys(report, required_root, allowed_root, "report")
     require(report["schema_version"] == schema["properties"]["schema_version"]["const"],
             "schema version mismatch")
     nonnegative_integer(report["session_id"], "session_id")
@@ -62,7 +65,7 @@ def main() -> None:
     }
     counter_fields = {
         "sent", "completed", "received", "timed_out", "in_flight", "local_errors",
-        "scheduler_skipped", "cache_skipped", "late_completions",
+        "scheduler_skipped", "cache_skipped", "late_completions", "cancelled",
         "post_destination_completions", "scheduler_late_slots",
         "scheduler_lateness_total_ms", "scheduler_lateness_max_ms", "last_error_code",
     }
@@ -78,7 +81,7 @@ def main() -> None:
     for index, hop in enumerate(report["hops"]):
         name = f"hop[{index}]"
         require(isinstance(hop, dict), f"{name} must be an object")
-        exact_keys(hop, required_hop, name)
+        exact_keys(hop, required_hop, allowed_hop, name)
         nonnegative_integer(hop["hop"], f"{name}.hop")
         require(hop["hop"] >= 1, f"{name}.hop must start at one")
         for field in counter_fields:
@@ -99,7 +102,7 @@ def main() -> None:
         for responder_index, responder in enumerate(hop["responders"]):
             responder_name = f"{name}.responders[{responder_index}]"
             require(isinstance(responder, dict), f"{responder_name} must be an object")
-            exact_keys(responder, required_responder, responder_name)
+            exact_keys(responder, required_responder, allowed_responder, responder_name)
             for field in responder_text_fields:
                 require(isinstance(responder[field], str), f"{responder_name}.{field} must be a string")
             require(bool(re.fullmatch(r"[0-9a-f]{16}", responder["id"])),

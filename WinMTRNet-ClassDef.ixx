@@ -211,6 +211,7 @@ private:
 		std::uint64_t scheduler_lateness_ms) noexcept;
 	void commitLocalError(unsigned ttl, std::uint64_t expected_epoch,
 		bool was_issued, std::uint32_t error_code) noexcept;
+	void commitCancelled(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitSchedulerSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitCacheSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitLateCompletion(unsigned ttl, std::uint64_t expected_epoch) noexcept;

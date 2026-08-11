@@ -40,6 +40,8 @@ public:
 	static constexpr unsigned DefaultMaxHops = WinMTRUtils::DEFAULT_MAX_HOPS;
 	static constexpr unsigned DefaultTimeoutMs = WinMTRUtils::DEFAULT_TIMEOUT_MS;
 	static constexpr unsigned DefaultCycles = WinMTRUtils::DEFAULT_CYCLES;
+	static constexpr unsigned DefaultGraceMs = WinMTRUtils::DEFAULT_GRACE_MS;
+	static constexpr unsigned DefaultMaxGlobalPps = WinMTRUtils::DEFAULT_MAX_GLOBAL_PPS;
 	static constexpr unsigned DefaultTos = WinMTRUtils::DEFAULT_TOS;
 	static constexpr int DefaultPattern = WinMTRUtils::DEFAULT_PAYLOAD_PATTERN;
 	static constexpr unsigned DefaultHistoryLimit = WinMTRUtils::DEFAULT_MAX_LRU;
@@ -64,6 +66,8 @@ public:
 	void SetMaxHops(unsigned value) noexcept { maxHops = value; }
 	void SetTimeoutMs(unsigned value) noexcept { timeoutMs = value; }
 	void SetCycles(unsigned value) noexcept { cycles = value; }
+	void SetGraceMs(unsigned value) noexcept { graceMs = value; }
+	void SetMaxGlobalPps(unsigned value) noexcept { maxGlobalPps = value; }
 	void SetTos(unsigned value) noexcept { tos = value; }
 	void SetPattern(int value) noexcept { pattern = value; }
 	void SetPayloadPattern(int value) noexcept { SetPattern(value); }
@@ -90,6 +94,8 @@ public:
 	[[nodiscard]] unsigned GetMaxHops() const noexcept { return maxHops; }
 	[[nodiscard]] unsigned GetTimeoutMs() const noexcept { return timeoutMs; }
 	[[nodiscard]] unsigned GetCycles() const noexcept { return cycles; }
+	[[nodiscard]] unsigned GetGraceMs() const noexcept { return graceMs; }
+	[[nodiscard]] unsigned GetMaxGlobalPps() const noexcept { return maxGlobalPps; }
 	[[nodiscard]] unsigned GetTos() const noexcept { return tos; }
 	[[nodiscard]] int GetPattern() const noexcept { return pattern; }
 	[[nodiscard]] int GetPayloadPattern() const noexcept { return GetPattern(); }
@@ -137,6 +143,10 @@ private:
 	static constexpr unsigned MaxTimeoutMs = WinMTRUtils::MAX_TIMEOUT_MS;
 	static constexpr unsigned MinCycles = WinMTRUtils::MIN_CYCLES;
 	static constexpr unsigned MaxCycles = WinMTRUtils::MAX_CYCLES;
+	static constexpr unsigned MinGraceMs = WinMTRUtils::MIN_GRACE_MS;
+	static constexpr unsigned MaxGraceMs = WinMTRUtils::MAX_GRACE_MS;
+	static constexpr unsigned MinMaxGlobalPps = WinMTRUtils::MIN_MAX_GLOBAL_PPS;
+	static constexpr unsigned MaxMaxGlobalPps = WinMTRUtils::MAX_MAX_GLOBAL_PPS;
 	static constexpr unsigned MinTos = WinMTRUtils::MIN_TOS;
 	static constexpr unsigned MaxTos = WinMTRUtils::MAX_TOS;
 	static constexpr int MinPattern = WinMTRUtils::MIN_PAYLOAD_PATTERN;
@@ -159,6 +169,8 @@ private:
 	unsigned maxHops = DefaultMaxHops;
 	unsigned timeoutMs = DefaultTimeoutMs;
 	unsigned cycles = DefaultCycles;
+	unsigned graceMs = DefaultGraceMs;
+	unsigned maxGlobalPps = DefaultMaxGlobalPps;
 	unsigned tos = DefaultTos;
 	int pattern = DefaultPattern;
 	unsigned historyLimit = DefaultHistoryLimit;
@@ -181,6 +193,8 @@ private:
 	CEdit editMaxHops;
 	CEdit editTimeoutMs;
 	CEdit editCycles;
+	CEdit editGraceMs;
+	CEdit editMaxGlobalPps;
 	CEdit editTos;
 	CEdit editPattern;
 	CEdit editHistoryLimit;
@@ -323,6 +337,8 @@ void WinMTROptions::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_EDIT_MAX_HOPS, editMaxHops);
 	DDX_Control(pDX, IDC_EDIT_TIMEOUT_MS, editTimeoutMs);
 	DDX_Control(pDX, IDC_EDIT_CYCLES, editCycles);
+	DDX_Control(pDX, IDC_EDIT_GRACE_MS, editGraceMs);
+	DDX_Control(pDX, IDC_EDIT_MAX_GLOBAL_PPS, editMaxGlobalPps);
 	DDX_Control(pDX, IDC_EDIT_TOS, editTos);
 	DDX_Control(pDX, IDC_EDIT_PATTERN, editPattern);
 	DDX_Control(pDX, IDC_EDIT_HISTORY_LIMIT, editHistoryLimit);
@@ -361,6 +377,8 @@ void WinMTROptions::PopulateControls()
 	SetUnsignedText(editMaxHops, maxHops);
 	SetUnsignedText(editTimeoutMs, timeoutMs);
 	SetUnsignedText(editCycles, cycles);
+	SetUnsignedText(editGraceMs, graceMs);
+	SetUnsignedText(editMaxGlobalPps, maxGlobalPps);
 	SetUnsignedText(editTos, tos);
 	SetSignedText(editPattern, pattern);
 	SetUnsignedText(editHistoryLimit, historyLimit);
@@ -411,7 +429,8 @@ void WinMTROptions::ApplyTechnicalFont()
 		technicalFont.CreatePointFont(90, WinMTRBranding::table_font.data())) {
 		CEdit* technicalEdits[] = {
 			&editInterval, &editPacketSize, &editMaxHops, &editTimeoutMs,
-			&editCycles, &editTos, &editPattern, &editHistoryLimit,
+			&editCycles, &editGraceMs, &editMaxGlobalPps, &editTos,
+			&editPattern, &editHistoryLimit,
 			&editStartTtl, &editMinimumTtl, &editUnknownLimit,
 			&editEcmpDisplayLimit, &editReplyCacheSeconds,
 			&editPublicRefreshMinutes
@@ -444,11 +463,11 @@ void WinMTROptions::ConfigureResponsiveLayout()
 	// A narrow single-column layout keeps every field and button fully visible;
 	// the existing vertical viewport handles the additional height.
 	constexpr int clientWidthDlu = 260;
-	constexpr int clientHeightDlu = 470;
+	constexpr int clientHeightDlu = 502;
 	MoveControlDlu(IDC_OPTIONS_GROUP_BRAND, 7, 7, 246, 29);
 	MoveControlDlu(IDC_OPTIONS_ICON, 15, 12, 18, 18);
 	MoveControlDlu(IDC_OPTIONS_PRODUCT, 42, 14, 201, 14);
-	MoveControlDlu(IDC_OPTIONS_GROUP_TRACE, 7, 41, 246, 228);
+	MoveControlDlu(IDC_OPTIONS_GROUP_TRACE, 7, 41, 246, 260);
 
 	struct FieldRow final { int label; int edit; };
 	constexpr FieldRow rows[] = {
@@ -464,7 +483,9 @@ void WinMTROptions::ConfigureResponsiveLayout()
 		{ IDC_OPTIONS_LABEL_MIN_TTL, IDC_EDIT_MIN_TTL },
 		{ IDC_OPTIONS_LABEL_UNKNOWN, IDC_EDIT_UNKNOWN_LIMIT },
 		{ IDC_OPTIONS_LABEL_ECMP, IDC_EDIT_ECMP_LIMIT },
-		{ IDC_OPTIONS_LABEL_REPLY_CACHE, IDC_EDIT_REPLY_CACHE_SECONDS }
+		{ IDC_OPTIONS_LABEL_REPLY_CACHE, IDC_EDIT_REPLY_CACHE_SECONDS },
+		{ IDC_OPTIONS_LABEL_GRACE, IDC_EDIT_GRACE_MS },
+		{ IDC_OPTIONS_LABEL_MAX_GLOBAL_PPS, IDC_EDIT_MAX_GLOBAL_PPS }
 	};
 	for (int index = 0; index < static_cast<int>(std::size(rows)); ++index) {
 		const int labelY = 54 + index * 16;
@@ -472,24 +493,24 @@ void WinMTROptions::ConfigureResponsiveLayout()
 		MoveControlDlu(rows[index].edit, 191, labelY - 2, 52, 14);
 	}
 
-	MoveControlDlu(IDC_OPTIONS_GROUP_NETWORK, 7, 275, 246, 137);
+	MoveControlDlu(IDC_OPTIONS_GROUP_NETWORK, 7, 307, 246, 137);
 	constexpr int checkIds[] = {
 		IDC_CHECK_RESOLVE_NAMES, IDC_CHECK_LOOKUP_ASN_ISP,
 		IDC_CHECK_DONT_FRAGMENT, IDC_CHECK_IPV4, IDC_CHECK_IPV6,
 		IDC_CHECK_QUERY_PUBLIC_INFO
 	};
 	for (int index = 0; index < static_cast<int>(std::size(checkIds)); ++index) {
-		MoveControlDlu(checkIds[index], 15, 288 + index * 15, 228, 12);
+		MoveControlDlu(checkIds[index], 15, 320 + index * 15, 228, 12);
 	}
-	MoveControlDlu(IDC_OPTIONS_LABEL_PUBLIC_REFRESH, 15, 382, 82, 11);
-	MoveControlDlu(IDC_COMBO_PUBLIC_REFRESH_MODE, 100, 379, 78, 70);
-	MoveControlDlu(IDC_EDIT_PUBLIC_REFRESH_MINUTES, 182, 379, 34, 14);
-	MoveControlDlu(IDC_OPTIONS_LABEL_PUBLIC_REFRESH_MINUTES, 220, 382, 28, 11);
+	MoveControlDlu(IDC_OPTIONS_LABEL_PUBLIC_REFRESH, 15, 414, 82, 11);
+	MoveControlDlu(IDC_COMBO_PUBLIC_REFRESH_MODE, 100, 411, 78, 70);
+	MoveControlDlu(IDC_EDIT_PUBLIC_REFRESH_MINUTES, 182, 411, 34, 14);
+	MoveControlDlu(IDC_OPTIONS_LABEL_PUBLIC_REFRESH_MINUTES, 220, 414, 28, 11);
 
-	MoveControlDlu(IDC_BUTTON_LICENSE, 7, 420, 90, 18);
-	MoveControlDlu(IDC_BUTTON_RESTORE_DEFAULTS, 103, 420, 75, 18);
-	MoveControlDlu(IDOK, 127, 444, 56, 18);
-	MoveControlDlu(IDCANCEL, 187, 444, 56, 18);
+	MoveControlDlu(IDC_BUTTON_LICENSE, 7, 452, 90, 18);
+	MoveControlDlu(IDC_BUTTON_RESTORE_DEFAULTS, 103, 452, 75, 18);
+	MoveControlDlu(IDOK, 127, 476, 56, 18);
+	MoveControlDlu(IDCANCEL, 187, 476, 56, 18);
 
 	CRect desiredClient(0, 0, clientWidthDlu, clientHeightDlu);
 	MapDialogRect(&desiredClient);
@@ -663,6 +684,8 @@ void WinMTROptions::RestoreDefaultValues() noexcept
 	maxHops = DefaultMaxHops;
 	timeoutMs = DefaultTimeoutMs;
 	cycles = DefaultCycles;
+	graceMs = DefaultGraceMs;
+	maxGlobalPps = DefaultMaxGlobalPps;
 	tos = DefaultTos;
 	pattern = DefaultPattern;
 	historyLimit = DefaultHistoryLimit;
@@ -704,6 +727,8 @@ void WinMTROptions::OnOK()
 	unsigned parsedMaxHops = 0;
 	unsigned parsedTimeoutMs = 0;
 	unsigned parsedCycles = 0;
+	unsigned parsedGraceMs = 0;
+	unsigned parsedMaxGlobalPps = 0;
 	unsigned parsedTos = 0;
 	int parsedPattern = 0;
 	unsigned parsedHistoryLimit = 0;
@@ -720,6 +745,8 @@ void WinMTROptions::OnOK()
 		ParseUnsigned(editMaxHops, parsedMaxHops) &&
 		ParseUnsigned(editTimeoutMs, parsedTimeoutMs) &&
 		ParseUnsigned(editCycles, parsedCycles) &&
+		ParseUnsigned(editGraceMs, parsedGraceMs) &&
+		ParseUnsigned(editMaxGlobalPps, parsedMaxGlobalPps) &&
 		ParseUnsigned(editTos, parsedTos) &&
 		ParseSigned(editPattern, parsedPattern) &&
 		ParseUnsigned(editHistoryLimit, parsedHistoryLimit) &&
@@ -734,6 +761,8 @@ void WinMTROptions::OnOK()
 		InRange(parsedMaxHops, MinMaxHops, MaxMaxHops) &&
 		InRange(parsedTimeoutMs, MinTimeoutMs, MaxTimeoutMs) &&
 		InRange(parsedCycles, MinCycles, MaxCycles) &&
+		InRange(parsedGraceMs, MinGraceMs, MaxGraceMs) &&
+		InRange(parsedMaxGlobalPps, MinMaxGlobalPps, MaxMaxGlobalPps) &&
 		InRange(parsedTos, MinTos, MaxTos) &&
 		InRange(parsedPattern, MinPattern, MaxPattern) &&
 		InRange(parsedHistoryLimit, MinHistoryLimit, MaxHistoryLimit) &&
@@ -762,6 +791,8 @@ void WinMTROptions::OnOK()
 	maxHops = parsedMaxHops;
 	timeoutMs = parsedTimeoutMs;
 	cycles = parsedCycles;
+	graceMs = parsedGraceMs;
+	maxGlobalPps = parsedMaxGlobalPps;
 	tos = parsedTos;
 	pattern = parsedPattern;
 	historyLimit = parsedHistoryLimit;

@@ -25,6 +25,7 @@
 | `timed_out` | deadline 內沒有可用回覆的探測數 |
 | `in_flight` | 已送出但尚未到 deadline／完成的探測數 |
 | `local_errors` | 本機配置、資源或 API 錯誤；不進入 loss 分母 |
+| `cancelled` | 使用者停止或 grace 到期時取消的已送探測；不進入 loss 分母 |
 | `scheduler_skipped` | 因 backpressure 略過的 send slot；不算已送出 |
 | `cache_skipped` | reply cache 命中而未送出的 slot；不算已送出 |
 | `late_completions` | deadline 後才回來、只保留診斷而不改寫統計的 completion |
@@ -39,7 +40,7 @@
 loss_percent = completed == 0 ? 0 : 100 × timed_out / completed
 ```
 
-`in_flight`、`local_errors`、`scheduler_skipped`、`cache_skipped` 與 late completion
+`in_flight`、`local_errors`、`cancelled`、`scheduler_skipped`、`cache_skipped` 與 late completion
 都不計入 loss。這可避免把本機負載、仍在等待或根本未發送的探測誤報為網路丟包。
 
 ## RTT、標準差與抖動

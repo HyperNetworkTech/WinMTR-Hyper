@@ -24,6 +24,8 @@
 - CLI 補齊 GUI 追蹤選項並嚴格驗證；解析錯誤使用 process exit code 2。
 - 目標 DNS 解析加入 5 秒 deadline 與取消；雙棧 A/AAAA 候選以 IPv4 優先、
   250 ms 交錯的 bounded 平行探測選出實際可用位址，不再逐一跑完整首輪路徑。
+- 停止與有限 cycles 加入可設定 grace drain；到期的 pending probe 明確記為
+  cancelled 且不算網路丟包。新增可設定的全 session PPS 硬上限並公平排程逾期 TTL。
 
 ### Quality
 

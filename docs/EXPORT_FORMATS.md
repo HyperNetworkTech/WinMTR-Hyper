@@ -24,7 +24,8 @@ ended_at_utc,duration_ms` 開始，再接 14 個穩定的量測欄。`row_kind` 
 正式 schema 位於 [`schema/winmtr-report-v1.json`](schema/winmtr-report-v1.json)。
 JSON 包含 session ID、UTC 起訖時間、duration、統計公式識別、完整 hop outcomes、
 排程診斷、metadata source/failure reason，以及 stable responder ID、hit count 與
-last-seen sequence。無回覆樣本的 RTT／jitter／stddev 欄位為 `null`。
+last-seen sequence。`cancelled` 是 grace 到期或使用者停止後取消的已送探測，
+不納入 loss。無回覆樣本的 RTT／jitter／stddev 欄位為 `null`。
 
 v1 只允許向後相容地新增 optional 欄位。刪除、改名、型別或既有語意改變都必須
 升 major schema version。`tests/golden/winmtr-report-v1.json` 覆蓋 CJK、non-BMP

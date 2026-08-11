@@ -48,6 +48,12 @@ export namespace WinMTRUtils {
 	export constexpr auto DEFAULT_CYCLES = 0u;
 	export constexpr auto MIN_CYCLES = 0u;
 	export constexpr auto MAX_CYCLES = 100000u;
+	export constexpr auto DEFAULT_GRACE_MS = 5000u;
+	export constexpr auto MIN_GRACE_MS = 0u;
+	export constexpr auto MAX_GRACE_MS = 30000u;
+	export constexpr auto DEFAULT_MAX_GLOBAL_PPS = 100u;
+	export constexpr auto MIN_MAX_GLOBAL_PPS = 1u;
+	export constexpr auto MAX_MAX_GLOBAL_PPS = 1000u;
 
 	export constexpr auto DEFAULT_TOS = 0u;
 	export constexpr auto MIN_TOS = 0u;

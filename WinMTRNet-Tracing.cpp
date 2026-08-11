@@ -390,6 +390,12 @@ struct probe_completion_queue final {
 			[this] { return !ready.empty(); });
 	}
 
+	void wait_until(std::chrono::steady_clock::time_point deadline)
+	{
+		std::unique_lock lock(mutex);
+		(void)changed.wait_until(lock, deadline, [this] { return !ready.empty(); });
+	}
+
 	void wait()
 	{
 		std::unique_lock lock(mutex);
@@ -648,6 +654,7 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 		.max_inflight_per_ttl = per_ttl_inflight,
 		.max_transport_outstanding = transport_limit,
 		.max_transport_outstanding_per_ttl = transport_per_ttl,
+		.max_global_pps = trace_options.max_global_pps,
 		.probes_per_ttl = stop_after_unreached_first_round
 			? 1u
 			: trace_options.cycles,
@@ -674,6 +681,7 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 	bool session_reached_destination = false;
 	bool session_had_usable_reply = false;
 	bool stopping = false;
+	std::optional<winmtr::probe::MonotonicMilliseconds> drain_deadline;
 	bool exploration_cycle = true;
 	bool initial_discovery = true;
 	unsigned highest_response_ttl = 0;
@@ -825,6 +833,7 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 				commitLateCompletion(request->token.ttl, request->token.epoch);
 				notify_changed();
 				break;
+			case winmtr::probe::CompletionDisposition::cancelled:
 			case winmtr::probe::CompletionDisposition::ignored_epoch:
 			case winmtr::probe::CompletionDisposition::unknown_token:
 				break;
@@ -834,20 +843,29 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 
 		if (stop_token.stop_requested() && !stopping) {
 			stopping = true;
-			scheduler.stop();
+			scheduler.begin_drain();
+			drain_deadline = now + trace_options.grace_ms;
 		}
-		if (!stopping) {
-			for (const auto& expired : scheduler.expire(now)) {
-				if (destination_ttl != 0
-					&& expired.ttl > std::max(mandatory_ttl, destination_ttl)) {
-					commitPostDestinationCompletion(expired.ttl, expired.epoch);
-				}
-				else {
-					commitTimeout(expired.ttl, expired.epoch);
-				}
+		for (const auto& expired : scheduler.expire(now)) {
+			if (destination_ttl != 0
+				&& expired.ttl > std::max(mandatory_ttl, destination_ttl)) {
+				commitPostDestinationCompletion(expired.ttl, expired.epoch);
+			}
+			else {
+				commitTimeout(expired.ttl, expired.epoch);
+			}
+			notify_changed();
+		}
+		if (stopping && scheduler.logical_inflight() == 0) drain_deadline.reset();
+		if (stopping && drain_deadline && now >= *drain_deadline) {
+			for (const auto& cancelled : scheduler.cancel_pending()) {
+				commitCancelled(cancelled.ttl, cancelled.epoch);
 				notify_changed();
 			}
+			drain_deadline.reset();
+		}
 
+		if (!stopping) {
 			auto due = scheduler.reserve_due(now);
 			for (const auto ttl : due.skipped_ttls) {
 				commitSchedulerSkipped(ttl, current_epoch);
@@ -916,22 +934,27 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 				}
 			}
 			refresh_completed_cycles();
-			if (scheduler.quotas_reached() && scheduler.logical_inflight() == 0) {
+			if (scheduler.quotas_reached()) {
 				stopping = true;
-				scheduler.stop();
+				scheduler.begin_drain();
+				drain_deadline = now + trace_options.grace_ms;
+				if (scheduler.logical_inflight() == 0) drain_deadline.reset();
 			}
 		}
 
 		if (stopping && scheduler.transport_outstanding() == 0 && requests.empty()) break;
 
-		if (stopping) {
+		auto wake = scheduler.next_wake_at();
+		if (drain_deadline && (!wake || *drain_deadline < *wake)) wake = drain_deadline;
+		if (stopping && !wake) {
 			completions.wait();
 			continue;
 		}
-		const auto wake = scheduler.next_wake_at();
 		if (!wake || *wake <= now) continue;
-		completions.wait_until(stop_token, std::chrono::steady_clock::time_point{
-			std::chrono::milliseconds{ *wake } });
+		const auto wake_time = std::chrono::steady_clock::time_point{
+			std::chrono::milliseconds{ *wake } };
+		if (stopping) completions.wait_until(wake_time);
+		else completions.wait_until(stop_token, wake_time);
 	}
 	if (session_reached_destination) return WinMTRTraceResult::destination;
 	if (session_had_usable_reply) return WinMTRTraceResult::reply;
@@ -1082,6 +1105,15 @@ void WinMTRNet::commitLocalError(unsigned ttl, std::uint64_t expected_epoch,
 	std::scoped_lock lock(ghMutex);
 	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
 	host[ttl - 1].noteLocalError(was_issued, error_code);
+	++data_revision;
+}
+
+void WinMTRNet::commitCancelled(unsigned ttl, std::uint64_t expected_epoch) noexcept
+{
+	std::scoped_lock lock(ghMutex);
+	if (expected_epoch != data_epoch.load(std::memory_order_relaxed)
+		|| ttl == 0 || ttl > host.size()) return;
+	host[ttl - 1].noteCancelled();
 	++data_revision;
 }
 

@@ -56,6 +56,8 @@ public:
 	void SetMaxHops(unsigned value, options_source source = options_source::none) noexcept;
 	void SetTimeoutMs(unsigned value, options_source source = options_source::none) noexcept;
 	void SetCycles(unsigned value, options_source source = options_source::none) noexcept;
+	void SetGraceMs(unsigned value, options_source source = options_source::none) noexcept;
+	void SetMaxGlobalPps(unsigned value, options_source source = options_source::none) noexcept;
 	void SetTos(unsigned value, options_source source = options_source::none) noexcept;
 	void SetPayloadPattern(int value, options_source source = options_source::none) noexcept;
 	void SetStartTtl(unsigned value, options_source source = options_source::none) noexcept;
@@ -77,6 +79,8 @@ public:
 	[[nodiscard]] unsigned getMaxHops() const noexcept override { return maxHops.load(); }
 	[[nodiscard]] unsigned getTimeoutMs() const noexcept override { return timeoutMs.load(); }
 	[[nodiscard]] unsigned getCycles() const noexcept override { return cycles.load(); }
+	[[nodiscard]] unsigned getGraceMs() const noexcept override { return graceMs.load(); }
+	[[nodiscard]] unsigned getMaxGlobalPps() const noexcept override { return maxGlobalPps.load(); }
 	[[nodiscard]] unsigned getTos() const noexcept override { return tos.load(); }
 	[[nodiscard]] int getPayloadPattern() const noexcept override { return payloadPattern.load(); }
 	[[nodiscard]] unsigned getStartTtl() const noexcept override { return startTtl.load(); }
@@ -162,6 +166,8 @@ private:
 	std::atomic_uint maxHops;
 	std::atomic_uint timeoutMs;
 	std::atomic_uint cycles;
+	std::atomic_uint graceMs;
+	std::atomic_uint maxGlobalPps;
 	std::atomic_uint tos;
 	std::atomic_int payloadPattern;
 	std::atomic_uint startTtl;
@@ -189,6 +195,8 @@ private:
 	bool hasMaxHopsFromCommandLine = false;
 	bool hasTimeoutFromCommandLine = false;
 	bool hasCyclesFromCommandLine = false;
+	bool hasGraceFromCommandLine = false;
+	bool hasMaxGlobalPpsFromCommandLine = false;
 	bool hasTosFromCommandLine = false;
 	bool hasPayloadPatternFromCommandLine = false;
 	bool hasStartTtlFromCommandLine = false;

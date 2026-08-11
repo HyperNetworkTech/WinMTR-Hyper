@@ -74,6 +74,8 @@ export namespace utils {
 			max_hops,
 			timeout,
 			cycles,
+			grace,
+			max_global_pps,
 			tos,
 			pattern,
 			start_ttl,
@@ -196,6 +198,8 @@ const wchar_t* utils::CWinMTRCommandLineParser::PendingOptionName() const noexce
 	case expect_next::max_hops: return L"--max-hops";
 	case expect_next::timeout: return L"--timeout";
 	case expect_next::cycles: return L"--cycles";
+	case expect_next::grace: return L"--grace";
+	case expect_next::max_global_pps: return L"--max-pps";
 	case expect_next::tos: return L"--tos";
 	case expect_next::pattern: return L"--pattern";
 	case expect_next::start_ttl: return L"--start-ttl";
@@ -294,6 +298,8 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 		else if (IsOption(pszParam, L"", L"max-hops")) next = expect_next::max_hops;
 		else if (IsOption(pszParam, L"", L"timeout")) next = expect_next::timeout;
 		else if (IsOption(pszParam, L"", L"cycles")) next = expect_next::cycles;
+		else if (IsOption(pszParam, L"", L"grace")) next = expect_next::grace;
+		else if (IsOption(pszParam, L"", L"max-pps")) next = expect_next::max_global_pps;
 		else if (IsOption(pszParam, L"", L"tos")) next = expect_next::tos;
 		else if (IsOption(pszParam, L"", L"pattern")) next = expect_next::pattern;
 		else if (IsOption(pszParam, L"", L"start-ttl")) next = expect_next::start_ttl;
@@ -420,6 +426,23 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 		if (!parseRangedInteger(WinMTRUtils::MIN_CYCLES,
 			WinMTRUtils::MAX_CYCLES, parsed)) return;
 		dlg.SetCycles(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::grace:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_GRACE_MS,
+			WinMTRUtils::MAX_GRACE_MS, parsed)) return;
+		dlg.SetGraceMs(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::max_global_pps:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_MAX_GLOBAL_PPS,
+			WinMTRUtils::MAX_MAX_GLOBAL_PPS, parsed)) return;
+		dlg.SetMaxGlobalPps(static_cast<unsigned>(parsed),
+			WinMTRDialog::options_source::cmd_line);
 		break;
 	}
 	case expect_next::tos:

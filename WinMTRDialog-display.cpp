@@ -431,6 +431,8 @@ WinMTRDialog::WinMTRDialog(CWnd* parent) noexcept
 	maxHops(WinMTRUtils::DEFAULT_MAX_HOPS),
 	timeoutMs(WinMTRUtils::DEFAULT_TIMEOUT_MS),
 	cycles(WinMTRUtils::DEFAULT_CYCLES),
+	graceMs(WinMTRUtils::DEFAULT_GRACE_MS),
+	maxGlobalPps(WinMTRUtils::DEFAULT_MAX_GLOBAL_PPS),
 	tos(WinMTRUtils::DEFAULT_TOS),
 	payloadPattern(WinMTRUtils::DEFAULT_PAYLOAD_PATTERN),
 	startTtl(WinMTRUtils::DEFAULT_START_TTL),
@@ -1027,6 +1029,18 @@ void WinMTRDialog::SetCycles(unsigned value, options_source source) noexcept
 {
 	cycles = value;
 	hasCyclesFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetGraceMs(unsigned value, options_source source) noexcept
+{
+	graceMs = value;
+	hasGraceFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetMaxGlobalPps(unsigned value, options_source source) noexcept
+{
+	maxGlobalPps = value;
+	hasMaxGlobalPpsFromCommandLine = source == options_source::cmd_line;
 }
 
 void WinMTRDialog::SetTos(unsigned value, options_source source) noexcept

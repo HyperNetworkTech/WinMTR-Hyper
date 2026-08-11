@@ -30,7 +30,7 @@ constexpr wchar_t rootKeyName[] = LR"(Software\WinMTR)";
 constexpr wchar_t configKeyName[] = LR"(Software\WinMTR\Config)";
 constexpr wchar_t historyKeyName[] = LR"(Software\WinMTR\LRU)";
 constexpr wchar_t historyCountName[] = L"NrLRU";
-constexpr DWORD currentSettingsSchemaVersion = 1;
+constexpr DWORD currentSettingsSchemaVersion = 2;
 
 [[nodiscard]] CString localized(UINT id)
 {
@@ -110,8 +110,8 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 	DWORD settingsSchemaVersion = 0;
 	if (config.QueryDWORDValue(L"SettingsSchemaVersion", settingsSchemaVersion) != ERROR_SUCCESS
 		|| settingsSchemaVersion < currentSettingsSchemaVersion) {
-		// Version 1 formalizes the existing value names and ranges. Older installs
-		// already use the same representation, so migration only needs to stamp it.
+		// Version 2 adds bounded grace and global packet-rate settings. queryDword
+		// writes their defaults for older installations during this initialization.
 		config.SetDWORDValue(L"SettingsSchemaVersion", currentSettingsSchemaVersion);
 	}
 	if (!hasPacketSizeFromCommandLine) packetSize = std::clamp<unsigned>(queryDword(config, L"PingSize",
@@ -130,6 +130,11 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 		WinMTRUtils::DEFAULT_TIMEOUT_MS), WinMTRUtils::MIN_TIMEOUT_MS, WinMTRUtils::MAX_TIMEOUT_MS);
 	if (!hasCyclesFromCommandLine) cycles = std::clamp<unsigned>(queryDword(config, L"Cycles",
 		WinMTRUtils::DEFAULT_CYCLES), WinMTRUtils::MIN_CYCLES, WinMTRUtils::MAX_CYCLES);
+	if (!hasGraceFromCommandLine) graceMs = std::clamp<unsigned>(queryDword(config, L"GraceMs",
+		WinMTRUtils::DEFAULT_GRACE_MS), WinMTRUtils::MIN_GRACE_MS, WinMTRUtils::MAX_GRACE_MS);
+	if (!hasMaxGlobalPpsFromCommandLine) maxGlobalPps = std::clamp<unsigned>(queryDword(config,
+		L"MaxGlobalPps", WinMTRUtils::DEFAULT_MAX_GLOBAL_PPS),
+		WinMTRUtils::MIN_MAX_GLOBAL_PPS, WinMTRUtils::MAX_MAX_GLOBAL_PPS);
 	if (!hasTosFromCommandLine) tos = std::clamp<unsigned>(queryDword(config, L"TOS",
 		WinMTRUtils::DEFAULT_TOS), WinMTRUtils::MIN_TOS, WinMTRUtils::MAX_TOS);
 	if (!hasPayloadPatternFromCommandLine) payloadPattern = std::clamp(static_cast<int>(queryDword(config,
@@ -196,6 +201,8 @@ void WinMTRDialog::SaveSettings() noexcept
 	config.SetDWORDValue(L"MaxHops", maxHops.load());
 	config.SetDWORDValue(L"TimeoutMs", timeoutMs.load());
 	config.SetDWORDValue(L"Cycles", cycles.load());
+	config.SetDWORDValue(L"GraceMs", graceMs.load());
+	config.SetDWORDValue(L"MaxGlobalPps", maxGlobalPps.load());
 	config.SetDWORDValue(L"TOS", tos.load());
 	config.SetDWORDValue(L"PayloadPattern", static_cast<DWORD>(payloadPattern.load()));
 	config.SetDWORDValue(L"StartTTL", startTtl.load());
@@ -281,6 +288,8 @@ void WinMTRDialog::OnOptions()
 	options.SetMaxHops(maxHops.load());
 	options.SetTimeoutMs(timeoutMs.load());
 	options.SetCycles(cycles.load());
+	options.SetGraceMs(graceMs.load());
+	options.SetMaxGlobalPps(maxGlobalPps.load());
 	options.SetTos(tos.load());
 	options.SetPattern(payloadPattern.load());
 	options.SetMaxLRU(historyLimit);
@@ -307,6 +316,8 @@ void WinMTRDialog::OnOptions()
 	maxHops = options.GetMaxHops();
 	timeoutMs = options.GetTimeoutMs();
 	cycles = options.GetCycles();
+	graceMs = options.GetGraceMs();
+	maxGlobalPps = options.GetMaxGlobalPps();
 	tos = options.GetTos();
 	payloadPattern = options.GetPattern();
 	historyLimit = options.GetMaxLRU();
