@@ -25,6 +25,7 @@ module;
 #include <WS2tcpip.h>
 #include "WinMTRICMPPIOdef.h"
 #include "WinMTRNetworkData.h"
+#include "WinMTRProbeScheduler.h"
 module WinMTR.Net:Tracing;
 
 import <algorithm>;
@@ -33,10 +34,16 @@ import <chrono>;
 import <cstddef>;
 import <cstdint>;
 import <cstring>;
+import <condition_variable>;
+import <deque>;
 import <iterator>;
+import <limits>;
 import <memory>;
+import <mutex>;
 import <string>;
+import <system_error>;
 import <thread>;
+import <unordered_map>;
 import <utility>;
 import <vector>;
 import WinMTRIPUtils;
@@ -97,6 +104,12 @@ struct parsed_reply final {
 	unsigned round_trip_ms = 0;
 	DWORD status = IP_GENERAL_FAILURE;
 };
+
+[[nodiscard]] winmtr::probe::MonotonicMilliseconds monotonic_now() noexcept
+{
+	return std::chrono::duration_cast<std::chrono::milliseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 [[nodiscard]] bool is_usable_trace_reply(DWORD status) noexcept
 {
@@ -256,47 +269,130 @@ void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 	return parsed;
 }
 
-[[nodiscard]] unsigned derive_path_ceiling(
-	const std::array<bool, WinMTRNet::MAX_HOPS>& responded,
-	const std::array<bool, WinMTRNet::MAX_HOPS>& destination_replied,
-	const WinMTRTraceOptions& options) noexcept
+struct probe_completion_queue;
+
+struct scheduled_probe final : std::enable_shared_from_this<scheduled_probe> {
+	winmtr::probe::ProbeToken token;
+	pending_probe probe;
+	unique_icmp_handle icmp_handle;
+	SOCKADDR_INET destination = {};
+	WinMTRTraceOptions options;
+	std::vector<std::byte> payload;
+	unsigned timeout_ms = 0;
+	probe_completion_queue* completions = nullptr;
+	PTP_WORK work = nullptr;
+	winmtr::probe::CompletionKind completion_kind =
+		winmtr::probe::CompletionKind::local_error;
+	parsed_reply parsed;
+	winmtr::probe::MonotonicMilliseconds completed_at = 0;
+	bool destination_reply = false;
+
+	~scheduled_probe() noexcept
+	{
+		if (work != nullptr) {
+			WaitForThreadpoolWorkCallbacks(work, FALSE);
+			CloseThreadpoolWork(work);
+		}
+	}
+};
+
+struct probe_completion_queue final {
+	void push(std::shared_ptr<scheduled_probe> request) noexcept
+	{
+		{
+			std::scoped_lock lock(mutex);
+			ready.push_back(std::move(request));
+		}
+		changed.notify_one();
+	}
+
+	[[nodiscard]] std::vector<std::shared_ptr<scheduled_probe>> drain()
+	{
+		std::vector<std::shared_ptr<scheduled_probe>> result;
+		std::scoped_lock lock(mutex);
+		result.reserve(ready.size());
+		while (!ready.empty()) {
+			result.push_back(std::move(ready.front()));
+			ready.pop_front();
+		}
+		return result;
+	}
+
+	void wait_until(std::chrono::steady_clock::time_point deadline)
+	{
+		std::unique_lock lock(mutex);
+		changed.wait_until(lock, deadline, [this] { return !ready.empty(); });
+	}
+
+	std::mutex mutex;
+	std::condition_variable changed;
+	std::deque<std::shared_ptr<scheduled_probe>> ready;
+};
+
+class probe_thread_pool final {
+public:
+	probe_thread_pool(unsigned maximum_threads, unsigned minimum_threads)
+	{
+		InitializeThreadpoolEnvironment(&environment_);
+		pool_ = CreateThreadpool(nullptr);
+		if (pool_ == nullptr) {
+			DestroyThreadpoolEnvironment(&environment_);
+			throw std::system_error(static_cast<int>(GetLastError()),
+				std::system_category(), "CreateThreadpool");
+		}
+		SetThreadpoolThreadMaximum(pool_, maximum_threads);
+		(void)SetThreadpoolThreadMinimum(pool_, std::min(maximum_threads, minimum_threads));
+		SetThreadpoolCallbackPool(&environment_, pool_);
+	}
+
+	~probe_thread_pool() noexcept
+	{
+		DestroyThreadpoolEnvironment(&environment_);
+		if (pool_ != nullptr) CloseThreadpool(pool_);
+	}
+
+	probe_thread_pool(const probe_thread_pool&) = delete;
+	probe_thread_pool& operator=(const probe_thread_pool&) = delete;
+
+	[[nodiscard]] PTP_CALLBACK_ENVIRON environment() noexcept { return &environment_; }
+
+private:
+	PTP_POOL pool_ = nullptr;
+	TP_CALLBACK_ENVIRON environment_ = {};
+};
+
+void CALLBACK probe_work_callback(PTP_CALLBACK_INSTANCE, void* context, PTP_WORK) noexcept
 {
-	unsigned first_destination = 0;
-	unsigned highest_response = 0;
-	for (unsigned ttl = options.start_ttl; ttl <= options.max_hops; ++ttl) {
-		if (responded[ttl - 1]) {
-			highest_response = ttl;
+	auto* raw = static_cast<scheduled_probe*>(context);
+	std::shared_ptr<scheduled_probe> request;
+	try {
+		request = raw->shared_from_this();
+		issue_probe(request->probe, request->icmp_handle.get(), request->destination,
+			request->options, request->payload, request->timeout_ms);
+		request->completed_at = monotonic_now();
+		request->parsed = parse_reply(request->probe, request->destination.si_family);
+		if (is_usable_trace_reply(request->parsed.status)
+			&& isValidAddress(request->parsed.address)) {
+			request->completion_kind = winmtr::probe::CompletionKind::reply;
+			request->destination_reply = request->parsed.status == IP_SUCCESS
+				&& same_network_address(request->parsed.address, request->destination);
 		}
-		if (first_destination == 0 && destination_replied[ttl - 1]) {
-			first_destination = ttl;
+		else if (request->probe.issued
+			&& request->probe.issue_error == IP_REQ_TIMED_OUT) {
+			request->completion_kind = winmtr::probe::CompletionKind::timeout;
+		}
+		else {
+			request->completion_kind = winmtr::probe::CompletionKind::local_error;
 		}
 	}
-
-	const auto mandatory_ttl = std::max(options.start_ttl, options.minimum_ttl);
-	if (first_destination != 0) {
-		return std::min(options.max_hops, std::max(first_destination, mandatory_ttl));
+	catch (...) {
+		if (!request) return;
+		request->probe.issued = false;
+		request->probe.issue_error = ERROR_NOT_ENOUGH_MEMORY;
+		request->completion_kind = winmtr::probe::CompletionKind::local_error;
 	}
-
-	const auto tail_origin = highest_response == 0
-		? options.start_ttl - 1
-		: highest_response;
-	const auto with_unknown_tail = std::min<std::uint64_t>(options.max_hops,
-		static_cast<std::uint64_t>(tail_origin) + options.unknown_host_limit);
-	return std::max(mandatory_ttl, static_cast<unsigned>(with_unknown_tail));
-}
-
-void wait_until_next_cycle(std::stop_token stop_token,
-	std::chrono::steady_clock::time_point deadline)
-{
-	using namespace std::chrono_literals;
-	while (!stop_token.stop_requested()) {
-		const auto now = std::chrono::steady_clock::now();
-		if (now >= deadline) {
-			return;
-		}
-		std::this_thread::sleep_for(std::min(50ms,
-			std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
-	}
+	if (request->completed_at == 0) request->completed_at = monotonic_now();
+	request->completions->push(std::move(request));
 }
 
 } // namespace
@@ -327,190 +423,241 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 		throw;
 	}
 	const auto this_session = session_id.load(std::memory_order_acquire);
-	// These Windows ICMP calls are synchronous: a silent hop blocks its worker
-	// until Timeout expires. Cap that wait at the configured send interval so a
-	// 3-second reply timeout cannot turn a 1-second MTR cadence into 3 seconds.
-	const auto interval_timeout_ms = std::clamp<unsigned>(
-		static_cast<unsigned>(trace_options.interval_seconds * 1000.0 + 0.5),
-		WinMTRUtils::MIN_TIMEOUT_MS, WinMTRUtils::MAX_TIMEOUT_MS);
-	const unsigned probe_timeout_ms = std::min(trace_options.timeout_ms, interval_timeout_ms);
 	struct trace_guard final {
 		WinMTRNet* owner;
 		std::uint64_t session;
 		~trace_guard() noexcept { owner->finishSession(session); }
 	} guard{ this, this_session };
 
-	std::vector<unique_icmp_handle> icmp_handles;
-	icmp_handles.reserve(trace_options.max_hops);
-	for (unsigned ttl = 1; ttl <= trace_options.max_hops; ++ttl) {
-		icmp_handles.push_back(create_icmp_handle(address.si_family));
-	}
+	const auto interval_ms = std::max<std::uint64_t>(1,
+		static_cast<std::uint64_t>(trace_options.interval_seconds * 1'000.0 + 0.5));
+	const auto per_ttl_inflight = static_cast<unsigned>(std::max<std::uint64_t>(1,
+		(static_cast<std::uint64_t>(trace_options.timeout_ms) + interval_ms - 1u) / interval_ms));
+	const auto logical_limit = static_cast<unsigned>(std::clamp<std::uint64_t>(
+		static_cast<std::uint64_t>(trace_options.max_hops) * per_ttl_inflight,
+		128u, 4'096u));
+	const auto transport_per_ttl = per_ttl_inflight + 1u;
+	const auto transport_limit = static_cast<unsigned>(std::clamp<std::uint64_t>(
+		static_cast<std::uint64_t>(trace_options.max_hops) * transport_per_ttl,
+		128u, 4'096u));
 
-	std::array<bool, MAX_HOPS> known_responded = {};
-	std::array<bool, MAX_HOPS> known_destination = {};
-	unsigned normal_ceiling = trace_options.max_hops;
-	bool force_exploration = true;
+	winmtr::probe::ProbeScheduler scheduler(winmtr::probe::SchedulerConfig{
+		.interval_ms = static_cast<winmtr::probe::MonotonicMilliseconds>(interval_ms),
+		.timeout_ms = trace_options.timeout_ms,
+		.first_ttl = trace_options.start_ttl,
+		.last_ttl = trace_options.max_hops,
+		.max_inflight = logical_limit,
+		.max_inflight_per_ttl = per_ttl_inflight,
+		.max_transport_outstanding = transport_limit,
+		.max_transport_outstanding_per_ttl = transport_per_ttl,
+		.probes_per_ttl = stop_after_unreached_first_round
+			? 1u
+			: trace_options.cycles,
+	});
+	probe_completion_queue completions;
+	probe_thread_pool worker_pool(transport_limit,
+		std::max(4u, std::min(transport_limit,
+			trace_options.max_hops * per_ttl_inflight)));
+	std::unordered_map<std::uint64_t, std::shared_ptr<scheduled_probe>> requests;
+	requests.reserve(transport_limit);
+
+	auto current_epoch = data_epoch.load(std::memory_order_acquire);
+	auto now = monotonic_now();
+	scheduler.start(this_session, current_epoch, now);
+	const auto mandatory_ttl = std::max(trace_options.start_ttl, trace_options.minimum_ttl);
+	// The first path discovery is complete but staggered over one interval.  A
+	// full initial sweep avoids hiding a destination behind an early run of
+	// silent routers; subsequent cycles use the configured unknown tail.
+	const auto initial_ceiling = trace_options.max_hops;
+	scheduler.set_last_ttl(initial_ceiling, now);
+
 	std::uint64_t random_state = GetTickCount64() ^ (this_session * 0x9e3779b97f4a7c15ull);
-	std::uint64_t quota_epoch = data_epoch.load(std::memory_order_acquire);
-	std::uint64_t completed_for_epoch = 0;
-	std::uint64_t cycle_serial = 0;
+	std::uint64_t reported_cycles = 0;
 	bool session_reached_destination = false;
 	bool session_had_usable_reply = false;
+	bool stopping = false;
+	bool exploration_cycle = true;
+	unsigned highest_response_ttl = 0;
+	unsigned destination_ttl = 0;
 
-	while (!stop_token.stop_requested()
-		&& (trace_options.cycles == 0 || completed_for_epoch < trace_options.cycles)) {
-		const auto cycle_started = std::chrono::steady_clock::now();
-		const auto round_epoch = data_epoch.load(std::memory_order_acquire);
-		if (round_epoch != quota_epoch) {
-			quota_epoch = round_epoch;
-			completed_for_epoch = 0;
-			known_responded.fill(false);
-			known_destination.fill(false);
-			normal_ceiling = trace_options.max_hops;
-			force_exploration = true;
+	const auto notify_changed = [this] {
+		if (options != nullptr) options->notifyTraceDataChanged();
+	};
+	const auto refresh_completed_cycles = [&] {
+		std::uint64_t minimum = std::numeric_limits<std::uint64_t>::max();
+		for (unsigned ttl = trace_options.start_ttl; ttl <= scheduler.active_last_ttl(); ++ttl) {
+			const auto& counters = scheduler.counters(ttl);
+			minimum = std::min(minimum, counters.completed + counters.local_errors
+				+ counters.cache_skipped);
 		}
-		++cycle_serial;
-		const auto round_number = completed_for_epoch + 1;
-		const bool exploration_round = force_exploration
-			|| round_number == 1
-			|| ((round_number - 1) % WinMTRUtils::PATH_EXPLORATION_PERIOD == 0);
-		force_exploration = false;
-
-		std::array<bool, MAX_HOPS> round_responded = {};
-		std::array<bool, MAX_HOPS> round_destination = {};
-		auto payload = make_payload(trace_options, random_state);
-		bool round_had_completed_probe = false;
-		const bool has_known_destination = std::any_of(known_destination.begin(),
-			known_destination.end(), [](bool value) { return value; });
-		const unsigned round_ceiling = exploration_round && !has_known_destination
-			? trace_options.max_hops
-			: normal_ceiling;
-
-		std::vector<pending_probe> probes;
-		probes.reserve(round_ceiling - trace_options.start_ttl + 1u);
-		const auto cache_tick = GetTickCount64();
-		for (unsigned ttl = trace_options.start_ttl; ttl <= round_ceiling; ++ttl) {
-			bool cached_destination = false;
-			if (replyIsCached(ttl, cache_tick, trace_options.reply_cache_seconds,
-				round_epoch, cached_destination)) {
-				round_responded[ttl - 1] = true;
-				round_destination[ttl - 1] = cached_destination;
-				continue;
+		if (minimum != std::numeric_limits<std::uint64_t>::max()
+			&& minimum > reported_cycles) {
+			reported_cycles = minimum;
+			setCompletedCycles(reported_cycles, current_epoch);
+			if (exploration_cycle) {
+				const auto tail_origin = highest_response_ttl == 0
+					? trace_options.start_ttl - 1u
+					: highest_response_ttl;
+				const auto normal_ceiling = destination_ttl != 0
+					? std::max(mandatory_ttl, destination_ttl)
+					: std::min(trace_options.max_hops,
+						std::max(mandatory_ttl, tail_origin + trace_options.unknown_host_limit));
+				scheduler.set_last_ttl(normal_ceiling, monotonic_now());
+				exploration_cycle = false;
 			}
-
-			pending_probe probe;
-			probe.ttl = ttl;
-			probes.push_back(std::move(probe));
-		}
-
-		// Windows' event/APC ICMP variants do not apply Timeout asynchronously.
-		// Run one synchronous call per TTL in parallel so each cycle (including
-		// Stop draining) is bounded by one configured timeout, off the UI thread.
-		// Every worker owns a distinct reply buffer.
-		{
-			std::vector<std::jthread> workers;
-			workers.reserve(probes.size());
-			for (auto& probe : probes) {
-				auto* pending = &probe;
-				const HANDLE handle = icmp_handles[probe.ttl - 1].get();
-				workers.emplace_back([this, pending, handle, &address, &trace_options, &payload,
-					probe_timeout_ms, cycle_serial, this_session, round_epoch] {
-					issue_probe(*pending, handle, address, trace_options, payload, probe_timeout_ms);
-					if (!pending->issued) return;
-					const auto parsed = parse_reply(*pending, address.si_family);
-					if (is_usable_trace_reply(parsed.status) && isValidAddress(parsed.address)) {
-						pending->usable_reply = true;
-						pending->destination_reply = parsed.status == IP_SUCCESS
-							&& same_network_address(parsed.address, address);
-						commitReply(pending->ttl, parsed.address, parsed.round_trip_ms, cycle_serial,
-							pending->completed_tick, this_session, round_epoch,
-							pending->destination_reply, trace_options.resolve_hostnames,
-							trace_options.lookup_asn_isp);
-					}
-					else {
-						commitTimeout(pending->ttl, round_epoch);
-					}
-					if (options != nullptr) options->notifyTraceDataChanged();
-				});
+			if (reported_cycles % WinMTRUtils::PATH_EXPLORATION_PERIOD == 0
+				&& scheduler.active_last_ttl() < trace_options.max_hops) {
+				exploration_cycle = true;
+				highest_response_ttl = 0;
+				destination_ttl = 0;
+				scheduler.set_last_ttl(trace_options.max_hops, monotonic_now());
 			}
-			// jthread destruction drains the complete batch. Pending probes are not
-			// visible as packet loss until their call completes or times out.
 		}
-		for (const auto& probe : probes) {
-			if (!probe.issued) continue;
-			round_had_completed_probe = true;
-			if (probe.usable_reply) {
-				round_responded[probe.ttl - 1] = true;
-				round_destination[probe.ttl - 1] = probe.destination_reply;
+	};
+
+	while (true) {
+		now = monotonic_now();
+		const auto observed_epoch = data_epoch.load(std::memory_order_acquire);
+		if (!stopping && observed_epoch != current_epoch) {
+			current_epoch = observed_epoch;
+			reported_cycles = 0;
+			session_reached_destination = false;
+			session_had_usable_reply = false;
+			exploration_cycle = true;
+			highest_response_ttl = 0;
+			destination_ttl = 0;
+			scheduler.restart(current_epoch, now);
+			scheduler.set_last_ttl(initial_ceiling, now);
+		}
+
+		for (auto& request : completions.drain()) {
+			const auto found = requests.find(request->token.sequence);
+			if (found == requests.end()) continue;
+			const auto disposition = scheduler.complete(request->token,
+				request->completion_kind, request->completed_at);
+			switch (disposition) {
+			case winmtr::probe::CompletionDisposition::accepted_reply: {
+				commitReply(request->token.ttl, request->parsed.address,
+					request->parsed.round_trip_ms, request->token.sequence,
+					request->probe.completed_tick, this_session, request->token.epoch,
+					request->destination_reply, trace_options.resolve_hostnames,
+					trace_options.lookup_asn_isp);
 				session_had_usable_reply = true;
-				session_reached_destination = session_reached_destination || probe.destination_reply;
+				highest_response_ttl = std::max(highest_response_ttl, request->token.ttl);
+				if (request->destination_reply) {
+					session_reached_destination = true;
+					destination_ttl = destination_ttl == 0
+						? request->token.ttl
+						: std::min(destination_ttl, request->token.ttl);
+					scheduler.set_last_ttl(std::max(mandatory_ttl, request->token.ttl), now);
+				}
+				notify_changed();
+				break;
+			}
+			case winmtr::probe::CompletionDisposition::accepted_timeout:
+				commitTimeout(request->token.ttl, request->token.epoch);
+				notify_changed();
+				break;
+			case winmtr::probe::CompletionDisposition::accepted_local_error:
+				commitLocalError(request->token.ttl, request->token.epoch, true);
+				notify_changed();
+				break;
+			case winmtr::probe::CompletionDisposition::late_discarded:
+				commitLateCompletion(request->token.ttl, request->token.epoch);
+				notify_changed();
+				break;
+			case winmtr::probe::CompletionDisposition::late_discarded_after_timeout:
+				commitTimeout(request->token.ttl, request->token.epoch);
+				commitLateCompletion(request->token.ttl, request->token.epoch);
+				notify_changed();
+				break;
+			case winmtr::probe::CompletionDisposition::ignored_epoch:
+			case winmtr::probe::CompletionDisposition::unknown_token:
+				break;
+			}
+			requests.erase(found);
+		}
+
+		if (stop_token.stop_requested() && !stopping) {
+			stopping = true;
+			scheduler.stop();
+		}
+		if (!stopping) {
+			for (const auto& expired : scheduler.expire(now)) {
+				commitTimeout(expired.ttl, expired.epoch);
+				notify_changed();
+			}
+
+			auto due = scheduler.reserve_due(now);
+			for (const auto ttl : due.skipped_ttls) {
+				commitSchedulerSkipped(ttl, current_epoch);
+				notify_changed();
+			}
+			for (const auto& slot : due.slots) {
+				bool cached_destination = false;
+				if (replyIsCached(slot.token.ttl, GetTickCount64(),
+					trace_options.reply_cache_seconds, slot.token.epoch,
+					cached_destination)) {
+					(void)scheduler.mark_cached(slot.token);
+					if (cached_destination) {
+						session_reached_destination = true;
+						scheduler.set_last_ttl(std::max(mandatory_ttl, slot.token.ttl), now);
+					}
+					continue;
+				}
+				try {
+					auto request = std::make_shared<scheduled_probe>();
+					request->token = slot.token;
+					request->probe.ttl = slot.token.ttl;
+					request->icmp_handle = create_icmp_handle(address.si_family);
+					request->destination = address;
+					request->options = trace_options;
+					request->payload = make_payload(trace_options, random_state);
+					request->timeout_ms = trace_options.timeout_ms;
+					request->completions = &completions;
+					if (!request->icmp_handle) {
+						(void)scheduler.mark_issue_failed(slot.token);
+						commitLocalError(slot.token.ttl, slot.token.epoch, false);
+						notify_changed();
+						continue;
+					}
+					request->work = CreateThreadpoolWork(probe_work_callback,
+						request.get(), worker_pool.environment());
+					if (request->work == nullptr) {
+						(void)scheduler.mark_issue_failed(slot.token);
+						commitLocalError(slot.token.ttl, slot.token.epoch, false);
+						notify_changed();
+						continue;
+					}
+					requests.emplace(slot.token.sequence, request);
+					if (!scheduler.mark_issued(slot.token, now)) {
+						requests.erase(slot.token.sequence);
+						continue;
+					}
+					commitIssued(slot.token.ttl, slot.token.epoch);
+					notify_changed();
+					SubmitThreadpoolWork(request->work);
+				}
+				catch (...) {
+					(void)scheduler.mark_issue_failed(slot.token);
+					commitLocalError(slot.token.ttl, slot.token.epoch, false);
+					notify_changed();
+				}
+			}
+			refresh_completed_cycles();
+			if (scheduler.quotas_reached() && scheduler.logical_inflight() == 0) {
+				stopping = true;
+				scheduler.stop();
 			}
 		}
 
-		bool round_accepted = false;
-		if (data_epoch.load(std::memory_order_acquire) == round_epoch) {
-			const bool round_has_destination = std::any_of(round_destination.begin(),
-				round_destination.end(), [](bool value) { return value; });
-			const bool previously_had_destination = std::any_of(known_destination.begin(),
-				known_destination.end(), [](bool value) { return value; });
-			auto current_path = known_responded;
-			if (exploration_round || completed_for_epoch == 0) {
-				// A full-path exploration is the authoritative current route.  This
-				// lets a formerly long path shrink instead of retaining a permanent
-				// historical response beyond the configured unknown-tail limit.
-				current_path = round_responded;
-			}
-			else {
-				for (size_t index = 0; index < current_path.size(); ++index) {
-					current_path[index] = current_path[index] || round_responded[index];
-				}
-			}
-			auto destination_path = known_destination;
-			if (round_has_destination) {
-				destination_path = round_destination;
-			}
-			else if (exploration_round || previously_had_destination) {
-				destination_path.fill(false);
-			}
-			const unsigned next_ceiling = derive_path_ceiling(current_path,
-				destination_path, trace_options);
-			std::scoped_lock lock(ghMutex);
-			if (data_epoch.load(std::memory_order_relaxed) == round_epoch) {
-				known_responded = current_path;
-				known_destination = destination_path;
-				normal_ceiling = next_ceiling;
-				if (!exploration_round && previously_had_destination && !round_has_destination) {
-					force_exploration = true;
-				}
-				if (round_had_completed_probe || display_max_ttl != 0) {
-					display_max_ttl = std::clamp(normal_ceiling,
-						session_start_ttl, session_options.max_hops);
-				}
-				++completed_for_epoch;
-				completed_cycles = completed_for_epoch;
-				++data_revision;
-				round_accepted = true;
-			}
-		}
-		if (!round_accepted) {
-			quota_epoch = data_epoch.load(std::memory_order_acquire);
-			completed_for_epoch = 0;
-			known_responded.fill(false);
-			known_destination.fill(false);
-			normal_ceiling = trace_options.max_hops;
-			force_exploration = true;
-			continue;
-		}
+		if (stopping && scheduler.transport_outstanding() == 0 && requests.empty()) break;
 
-		if (stop_token.stop_requested()
-			|| (stop_after_unreached_first_round && completed_for_epoch == 1
-				&& !session_reached_destination)
-			|| (trace_options.cycles != 0 && completed_for_epoch >= trace_options.cycles)) {
-			break;
-		}
-		const auto interval = std::chrono::duration<double>(trace_options.interval_seconds);
-		wait_until_next_cycle(stop_token, cycle_started
-			+ std::chrono::duration_cast<std::chrono::steady_clock::duration>(interval));
+		auto wake = scheduler.next_wake_at().value_or(now + 50);
+		wake = std::min(wake, now + 50);
+		if (wake <= now) continue;
+		completions.wait_until(std::chrono::steady_clock::time_point{
+			std::chrono::milliseconds{ wake } });
 	}
 	if (session_reached_destination) return WinMTRTraceResult::destination;
 	if (session_had_usable_reply) return WinMTRTraceResult::reply;
@@ -567,6 +714,18 @@ void WinMTRNet::setDisplayMaximum(unsigned ttl, std::uint64_t expected_epoch) no
 	++data_revision;
 }
 
+void WinMTRNet::setCompletedCycles(std::uint64_t cycles,
+	std::uint64_t expected_epoch) noexcept
+{
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch
+		|| cycles <= completed_cycles) {
+		return;
+	}
+	completed_cycles = cycles;
+	++data_revision;
+}
+
 bool WinMTRNet::replyIsCached(unsigned ttl, std::uint64_t now_tick,
 	unsigned cache_seconds, std::uint64_t expected_epoch,
 	bool& is_destination) const noexcept
@@ -606,6 +765,47 @@ void WinMTRNet::commitTimeout(unsigned ttl, std::uint64_t expected_epoch) noexce
 	// so a faster high-TTL timeout cannot expose unfinished hops as packet loss.
 	display_max_ttl = std::max(display_max_ttl,
 		std::clamp(ttl, session_start_ttl, session_options.max_hops));
+	++data_revision;
+}
+
+void WinMTRNet::commitIssued(unsigned ttl, std::uint64_t expected_epoch) noexcept
+{
+	if (ttl == 0 || ttl > host.size()) return;
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
+	host[ttl - 1].noteIssued();
+	display_max_ttl = std::max(display_max_ttl,
+		std::clamp(ttl, session_start_ttl, session_options.max_hops));
+	++data_revision;
+}
+
+void WinMTRNet::commitLocalError(unsigned ttl, std::uint64_t expected_epoch,
+	bool was_issued) noexcept
+{
+	if (ttl == 0 || ttl > host.size()) return;
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
+	host[ttl - 1].noteLocalError(was_issued);
+	++data_revision;
+}
+
+void WinMTRNet::commitSchedulerSkipped(unsigned ttl,
+	std::uint64_t expected_epoch) noexcept
+{
+	if (ttl == 0 || ttl > host.size()) return;
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
+	host[ttl - 1].noteSchedulerSkipped();
+	++data_revision;
+}
+
+void WinMTRNet::commitLateCompletion(unsigned ttl,
+	std::uint64_t expected_epoch) noexcept
+{
+	if (ttl == 0 || ttl > host.size()) return;
+	std::scoped_lock lock(ghMutex);
+	if (data_epoch.load(std::memory_order_relaxed) != expected_epoch) return;
+	host[ttl - 1].noteLateCompletion();
 	++data_revision;
 }
 

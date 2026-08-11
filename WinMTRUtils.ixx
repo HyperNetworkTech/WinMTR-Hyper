@@ -41,7 +41,7 @@ export namespace WinMTRUtils {
 	export constexpr auto MIN_MAX_HOPS = 1u;
 	export constexpr auto MAX_MAX_HOPS = 64u;
 
-	export constexpr auto DEFAULT_TIMEOUT_MS = 1000u;
+	export constexpr auto DEFAULT_TIMEOUT_MS = 3000u;
 	export constexpr auto MIN_TIMEOUT_MS = 100u;
 	export constexpr auto MAX_TIMEOUT_MS = 10000u;
 

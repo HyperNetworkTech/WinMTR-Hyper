@@ -38,6 +38,7 @@ void test_silent_30_hops_keep_one_hertz_cadence()
 	scheduler.start(7, 11, 0);
 	std::multimap<MonotonicMilliseconds, ProbeToken> os_completions;
 	std::vector<std::uint64_t> maximum_inflight(31);
+	std::vector<MonotonicMilliseconds> first_send(31, -1);
 
 	for (MonotonicMilliseconds now = 0; now <= 60'000; ++now) {
 		while (!os_completions.empty() && os_completions.begin()->first <= now) {
@@ -54,6 +55,7 @@ void test_silent_30_hops_keep_one_hertz_cadence()
 		require(due.skipped_ttls.empty(), "normal silent cadence hit backpressure");
 		for (const auto& slot : due.slots) {
 			require(scheduler.mark_issued(slot.token, now), "could not mark slot issued");
+			if (first_send[slot.token.ttl] < 0) first_send[slot.token.ttl] = now;
 			os_completions.emplace(now + 3'000, slot.token);
 		}
 		for (unsigned ttl = 1; ttl <= 30; ++ttl) {
@@ -70,6 +72,10 @@ void test_silent_30_hops_keep_one_hertz_cadence()
 			"silent TTL exceeded three logical in-flight probes");
 		require(counters.received == 0, "silent TTL unexpectedly received a reply");
 		require(counters.local_errors == 0, "silent TTL was misclassified as local error");
+		const auto expected_offset = static_cast<MonotonicMilliseconds>(ttl - 1u)
+			* 1'000 / 30;
+		require(first_send[ttl] == expected_offset,
+			"first TTL sweep was not uniformly staggered across the interval");
 	}
 }
 
@@ -178,6 +184,27 @@ void test_restart_epoch_race_10_000_times()
 		"stress stop did not drain scheduler state");
 }
 
+void test_start_stop_late_completion_race_10_000_times()
+{
+	ProbeScheduler scheduler(standard_config(1));
+	for (std::uint64_t iteration = 1; iteration <= 10'000; ++iteration) {
+		const auto now = static_cast<MonotonicMilliseconds>(iteration) * 10;
+		scheduler.start(iteration, iteration, now);
+		auto due = scheduler.reserve_due(now);
+		require(due.slots.size() == 1, "lifecycle stress did not reserve initial slot");
+		const auto token = due.slots.front().token;
+		require(scheduler.mark_issued(token, now), "lifecycle stress could not issue probe");
+		scheduler.stop();
+		require(scheduler.logical_inflight() == 0,
+			"stop retained a logical in-flight probe");
+		require(scheduler.complete(token, CompletionKind::reply, now + 1)
+			== CompletionDisposition::ignored_epoch,
+			"completion after stop escaped generation guard");
+		require(scheduler.transport_outstanding() == 0,
+			"completion after stop leaked transport state");
+	}
+}
+
 } // namespace
 
 int main()
@@ -188,6 +215,7 @@ int main()
 		test_late_reply_is_discarded_monotonically();
 		test_local_failure_and_backpressure_are_not_network_loss();
 		test_restart_epoch_race_10_000_times();
+		test_start_stop_late_completion_race_10_000_times();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;
 	}

@@ -73,9 +73,10 @@ public:
 	[[nodiscard]] bool getQueryPublicNetworkInfo() const noexcept override { return queryPublicInfo.load(); }
 	void notifyTraceDataChanged() const noexcept override
 	{
-		if (const HWND window = GetSafeHwnd(); window != nullptr) {
-			::PostMessageW(window, messageTraceDataChanged, 0, 0);
-		}
+		// The 100 ms dialog timer coalesces bursts of per-probe events.  Keeping
+		// this callback lock-free also prevents the trace scheduler from waiting
+		// on a busy UI thread.
+		traceDataDirty.store(true, std::memory_order_release);
 	}
 
 protected:
@@ -128,6 +129,7 @@ private:
 	std::mutex tracerMutex;
 	std::optional<std::jthread> traceThread;
 	std::atomic_bool tracing = false;
+	mutable std::atomic_bool traceDataDirty = false;
 	std::atomic_uint64_t traceGeneration = 0;
 	std::uint64_t lastRenderedRevision = ~std::uint64_t{};
 	STATES state = STATES::IDLE;

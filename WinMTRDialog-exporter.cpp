@@ -244,7 +244,13 @@ struct ExportRow final {
 			<< L"\"ip\":\"" << jsonEscape(addr_to_string(hop.addr)) << L"\","
 			<< L"\"loss_percent\":" << std::format(L"{:.2f}", hop.getLossPercent()) << L','
 			<< L"\"sent\":" << hop.xmit << L','
+			<< L"\"completed\":" << hop.completed << L','
 			<< L"\"received\":" << hop.returned << L','
+			<< L"\"timed_out\":" << hop.timed_out << L','
+			<< L"\"in_flight\":" << hop.in_flight << L','
+			<< L"\"local_errors\":" << hop.local_errors << L','
+			<< L"\"scheduler_skipped\":" << hop.scheduler_skipped << L','
+			<< L"\"late_completions\":" << hop.late_completions << L','
 			<< L"\"best_ms\":" << hop.best << L','
 			<< L"\"average_ms\":" << std::format(L"{:.2f}", hop.getAverageMs()) << L','
 			<< L"\"worst_ms\":" << hop.worst << L','

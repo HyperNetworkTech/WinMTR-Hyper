@@ -81,8 +81,14 @@ export struct s_nethost final {
 	std::wstring country;
 	std::wstring asn;
 	std::wstring isp;
-	std::uint64_t xmit = 0;		// completed PING probes
+	std::uint64_t xmit = 0;		// probes accepted by the transport (Sent column)
+	std::uint64_t completed = 0;	// received + timed_out; excludes in-flight/local failures
 	std::uint64_t returned = 0;	// completed probes with a usable ICMP reply
+	std::uint64_t timed_out = 0;	// logical network deadlines reached
+	std::uint64_t in_flight = 0;	// issued but not logically completed
+	std::uint64_t local_errors = 0;
+	std::uint64_t scheduler_skipped = 0;
+	std::uint64_t late_completions = 0;
 	std::uint64_t total = 0;		// total round-trip time in milliseconds
 	int last = 0;				// last time
 	int best = 0;				// best time
@@ -104,11 +110,11 @@ export struct s_nethost final {
 
 	[[nodiscard]]
 	inline int getPercent() const noexcept {
-		if (xmit == 0) {
+		if (completed == 0) {
 			return 0;
 		}
-		return static_cast<int>(std::lround(100.0 * static_cast<double>(xmit - returned)
-			/ static_cast<double>(xmit)));
+		return static_cast<int>(std::lround(100.0 * static_cast<double>(timed_out)
+			/ static_cast<double>(completed)));
 	}
 	[[nodiscard]]
 	inline int getAvg() const noexcept {
@@ -116,8 +122,8 @@ export struct s_nethost final {
 	}
 	[[nodiscard]]
 	inline double getLossPercent() const noexcept {
-		return xmit == 0 ? 0.0 : 100.0 * static_cast<double>(xmit - returned)
-			/ static_cast<double>(xmit);
+		return completed == 0 ? 0.0 : 100.0 * static_cast<double>(timed_out)
+			/ static_cast<double>(completed);
 	}
 	[[nodiscard]]
 	inline double getAverageMs() const noexcept {
@@ -137,15 +143,24 @@ export struct s_nethost final {
 		hop = hop_number;
 	}
 
-	void noteTimeout() noexcept
+	void noteIssued() noexcept
 	{
 		++xmit;
+		++in_flight;
+	}
+
+	void noteTimeout() noexcept
+	{
+		++completed;
+		++timed_out;
+		if (in_flight != 0) --in_flight;
 	}
 
 	void noteReply(unsigned round_trip_ms, std::uint64_t cycle, std::uint64_t tick) noexcept
 	{
-		++xmit;
+		++completed;
 		++returned;
+		if (in_flight != 0) --in_flight;
 		last = static_cast<int>(round_trip_ms);
 		total += round_trip_ms;
 		if (returned == 1 || last < best) {
@@ -170,6 +185,22 @@ export struct s_nethost final {
 		has_previous_reply = true;
 		last_reply_tick = tick;
 		last_reply_cycle = cycle;
+	}
+
+	void noteLocalError(bool was_issued) noexcept
+	{
+		++local_errors;
+		if (was_issued && in_flight != 0) --in_flight;
+	}
+
+	void noteSchedulerSkipped() noexcept
+	{
+		++scheduler_skipped;
+	}
+
+	void noteLateCompletion() noexcept
+	{
+		++late_completions;
 	}
 
 	[[nodiscard]]

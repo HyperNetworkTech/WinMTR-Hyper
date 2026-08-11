@@ -51,6 +51,7 @@ struct ProbeCounters final {
 	std::uint64_t in_flight = 0;
 	std::uint64_t local_errors = 0;
 	std::uint64_t scheduler_skipped = 0;
+	std::uint64_t cache_skipped = 0;
 	std::uint64_t late_completions = 0;
 	std::uint64_t transport_outstanding = 0;
 
@@ -73,6 +74,7 @@ enum class CompletionDisposition {
 	accepted_timeout,
 	accepted_local_error,
 	late_discarded,
+	late_discarded_after_timeout,
 	ignored_epoch,
 	unknown_token
 };
@@ -98,6 +100,7 @@ public:
 		retire_logical_state_for_epoch_change();
 		epoch_ = epoch;
 		active_ = true;
+		active_last_ttl_ = config_.last_ttl;
 		for (unsigned ttl = config_.first_ttl; ttl <= config_.last_ttl; ++ttl) {
 			auto& state = ttl_[ttl];
 			const auto still_outstanding = state.counters.transport_outstanding;
@@ -114,12 +117,27 @@ public:
 		retire_logical_state_for_epoch_change();
 	}
 
+	void set_last_ttl(unsigned last_ttl, MonotonicMilliseconds now) noexcept
+	{
+		const auto next_last = std::clamp(last_ttl, config_.first_ttl, config_.last_ttl);
+		if (next_last == active_last_ttl_) return;
+		if (next_last > active_last_ttl_) {
+			const auto added = static_cast<MonotonicMilliseconds>(next_last - active_last_ttl_);
+			for (unsigned ttl = active_last_ttl_ + 1u; ttl <= next_last; ++ttl) {
+				const auto offset = static_cast<MonotonicMilliseconds>(ttl - active_last_ttl_ - 1u)
+					* config_.interval_ms / std::max<MonotonicMilliseconds>(1, added);
+				ttl_[ttl].next_send_at = now + offset;
+			}
+		}
+		active_last_ttl_ = next_last;
+	}
+
 	[[nodiscard]] DueBatch reserve_due(MonotonicMilliseconds now)
 	{
 		DueBatch batch;
 		if (!active_) return batch;
 
-		for (unsigned ttl = config_.first_ttl; ttl <= config_.last_ttl; ++ttl) {
+		for (unsigned ttl = config_.first_ttl; ttl <= active_last_ttl_; ++ttl) {
 			auto& state = ttl_[ttl];
 			if (now < state.next_send_at || quota_reached(state)) continue;
 
@@ -191,6 +209,20 @@ public:
 		return true;
 	}
 
+	[[nodiscard]] bool mark_cached(const ProbeToken& token)
+	{
+		auto found = matching_record(token);
+		if (found == records_.end() || found->second.state != RecordState::reserved) {
+			return false;
+		}
+		auto& state = ttl_[token.ttl];
+		--state.reserved;
+		--reserved_;
+		++state.counters.cache_skipped;
+		records_.erase(found);
+		return true;
+	}
+
 	[[nodiscard]] std::vector<ProbeToken> expire(MonotonicMilliseconds now)
 	{
 		std::vector<ProbeToken> expired;
@@ -239,7 +271,7 @@ public:
 			--logical_inflight_;
 			retire_transport(counters);
 			records_.erase(found);
-			return CompletionDisposition::late_discarded;
+			return CompletionDisposition::late_discarded_after_timeout;
 		}
 
 		--counters.in_flight;
@@ -285,7 +317,7 @@ public:
 	[[nodiscard]] bool quotas_reached() const noexcept
 	{
 		if (config_.probes_per_ttl == 0) return false;
-		for (unsigned ttl = config_.first_ttl; ttl <= config_.last_ttl; ++ttl) {
+		for (unsigned ttl = config_.first_ttl; ttl <= active_last_ttl_; ++ttl) {
 			if (!quota_reached(ttl_[ttl])) return false;
 		}
 		return true;
@@ -295,7 +327,7 @@ public:
 	{
 		std::optional<MonotonicMilliseconds> result;
 		if (active_) {
-			for (unsigned ttl = config_.first_ttl; ttl <= config_.last_ttl; ++ttl) {
+			for (unsigned ttl = config_.first_ttl; ttl <= active_last_ttl_; ++ttl) {
 				if (!quota_reached(ttl_[ttl])) minimize(result, ttl_[ttl].next_send_at);
 			}
 		}
@@ -307,6 +339,7 @@ public:
 	}
 
 	[[nodiscard]] const SchedulerConfig& config() const noexcept { return config_; }
+	[[nodiscard]] unsigned active_last_ttl() const noexcept { return active_last_ttl_; }
 
 private:
 	enum class RecordState { reserved, issued, timed_out, ignored_epoch };
@@ -341,8 +374,8 @@ private:
 	void initialize_send_deadlines(MonotonicMilliseconds now) noexcept
 	{
 		const auto count = static_cast<MonotonicMilliseconds>(
-			config_.last_ttl - config_.first_ttl + 1u);
-		for (unsigned ttl = config_.first_ttl; ttl <= config_.last_ttl; ++ttl) {
+			active_last_ttl_ - config_.first_ttl + 1u);
+		for (unsigned ttl = config_.first_ttl; ttl <= active_last_ttl_; ++ttl) {
 			const auto offset = static_cast<MonotonicMilliseconds>(ttl - config_.first_ttl)
 				* config_.interval_ms / count;
 			ttl_[ttl].next_send_at = now + offset;
@@ -372,7 +405,9 @@ private:
 	[[nodiscard]] bool quota_reached(const TtlState& state) const noexcept
 	{
 		return config_.probes_per_ttl != 0
-			&& state.counters.sent + state.reserved >= config_.probes_per_ttl;
+			&& state.counters.sent + state.counters.local_errors
+				+ state.counters.cache_skipped + state.reserved
+				>= config_.probes_per_ttl;
 	}
 
 	[[nodiscard]] RecordMap::iterator matching_record(const ProbeToken& token)
@@ -403,6 +438,7 @@ private:
 	std::uint64_t logical_inflight_ = 0;
 	std::uint64_t transport_outstanding_ = 0;
 	std::uint64_t reserved_ = 0;
+	unsigned active_last_ttl_ = config_.last_ttl;
 	bool active_ = false;
 };
 

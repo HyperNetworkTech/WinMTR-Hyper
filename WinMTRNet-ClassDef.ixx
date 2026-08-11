@@ -170,10 +170,16 @@ private:
 		const WinMTRTraceOptions& trace_options);
 	void finishSession(std::uint64_t expected_session) noexcept;
 	void setDisplayMaximum(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void setCompletedCycles(std::uint64_t cycles, std::uint64_t expected_epoch) noexcept;
 	[[nodiscard]] bool replyIsCached(unsigned ttl, std::uint64_t now_tick,
 		unsigned cache_seconds, std::uint64_t expected_epoch,
 		bool& is_destination) const noexcept;
 	void commitTimeout(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitIssued(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitLocalError(unsigned ttl, std::uint64_t expected_epoch,
+		bool was_issued) noexcept;
+	void commitSchedulerSkipped(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitLateCompletion(unsigned ttl, std::uint64_t expected_epoch) noexcept;
 	void commitReply(unsigned ttl, const SOCKADDR_INET& responder, unsigned round_trip_ms,
 		std::uint64_t cycle, std::uint64_t tick, std::uint64_t expected_session,
 		std::uint64_t expected_epoch, bool is_destination, bool resolve_hostname,

@@ -102,8 +102,10 @@ void WinMTRDialog::OnTimer(UINT_PTR timerId) noexcept
 {
 	static unsigned redrawDivider = 0;
 	if (timerId == dialogTimerId) {
-		if ((state == STATES::TRACING || state == STATES::STOPPING || listIsVisible)
-			&& ++redrawDivider % 5 == 0) {
+		const bool hasTraceEvent = traceDataDirty.exchange(false, std::memory_order_acq_rel);
+		if (hasTraceEvent
+			|| ((state == STATES::TRACING || state == STATES::STOPPING || listIsVisible)
+				&& ++redrawDivider % 5 == 0)) {
 			DisplayRedraw();
 		}
 		const bool active = tracing.load(std::memory_order_acquire) || wmtrnet->isTracing();
@@ -148,7 +150,7 @@ LRESULT WinMTRDialog::OnTraceFinished(WPARAM generation, LPARAM errorCode)
 
 LRESULT WinMTRDialog::OnTraceDataChanged(WPARAM, LPARAM)
 {
-	DisplayRedraw();
+	traceDataDirty.store(true, std::memory_order_release);
 	return 0;
 }
 
