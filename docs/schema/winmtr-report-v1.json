@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hypernetwork.tech/schema/winmtr-report-v1.json",
+  "title": "WinMTR Hyper report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "statistics",
+    "target",
+    "started_at_utc",
+    "ended_at_utc",
+    "duration_ms",
+    "hops"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "session_id": { "type": "integer", "minimum": 0 },
+    "statistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["loss", "stddev", "jitter"],
+      "properties": {
+        "loss": { "const": "timed_out/completed" },
+        "stddev": { "const": "sample_standard_deviation" },
+        "jitter": { "const": "ewma_absolute_consecutive_delta_alpha_1_16" }
+      }
+    },
+    "target": { "type": "string" },
+    "started_at_utc": { "$ref": "#/$defs/timestamp" },
+    "ended_at_utc": {
+      "oneOf": [
+        { "$ref": "#/$defs/timestamp" },
+        { "type": "null" }
+      ]
+    },
+    "duration_ms": { "type": "integer", "minimum": 0 },
+    "hops": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/hop" }
+    }
+  },
+  "$defs": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z$"
+    },
+    "nullableMilliseconds": {
+      "oneOf": [
+        { "type": "number", "minimum": 0 },
+        { "type": "null" }
+      ]
+    },
+    "responder": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "hit_count",
+        "last_seen_sequence",
+        "host",
+        "ip",
+        "country",
+        "asn",
+        "isp",
+        "metadata_source",
+        "metadata_failure_reason"
+      ],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9a-f]{16}$" },
+        "hit_count": { "type": "integer", "minimum": 0 },
+        "last_seen_sequence": { "type": "integer", "minimum": 0 },
+        "host": { "type": "string" },
+        "ip": { "type": "string" },
+        "country": { "type": "string" },
+        "asn": { "type": "string" },
+        "isp": { "type": "string" },
+        "metadata_source": { "type": "string" },
+        "metadata_failure_reason": { "type": "string" }
+      }
+    },
+    "hop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "hop",
+        "host",
+        "ip",
+        "loss_percent",
+        "sent",
+        "completed",
+        "received",
+        "timed_out",
+        "in_flight",
+        "local_errors",
+        "scheduler_skipped",
+        "cache_skipped",
+        "late_completions",
+        "post_destination_completions",
+        "scheduler_late_slots",
+        "scheduler_lateness_total_ms",
+        "scheduler_lateness_max_ms",
+        "last_outcome",
+        "last_error_code",
+        "best_ms",
+        "average_ms",
+        "worst_ms",
+        "last_ms",
+        "jitter_ms",
+        "recent_jitter_ms",
+        "stddev_ms",
+        "country",
+        "asn",
+        "isp",
+        "metadata_source",
+        "metadata_failure_reason",
+        "responders"
+      ],
+      "properties": {
+        "hop": { "type": "integer", "minimum": 1 },
+        "host": { "type": "string" },
+        "ip": { "type": "string" },
+        "loss_percent": { "type": "number", "minimum": 0, "maximum": 100 },
+        "sent": { "type": "integer", "minimum": 0 },
+        "completed": { "type": "integer", "minimum": 0 },
+        "received": { "type": "integer", "minimum": 0 },
+        "timed_out": { "type": "integer", "minimum": 0 },
+        "in_flight": { "type": "integer", "minimum": 0 },
+        "local_errors": { "type": "integer", "minimum": 0 },
+        "scheduler_skipped": { "type": "integer", "minimum": 0 },
+        "cache_skipped": { "type": "integer", "minimum": 0 },
+        "late_completions": { "type": "integer", "minimum": 0 },
+        "post_destination_completions": { "type": "integer", "minimum": 0 },
+        "scheduler_late_slots": { "type": "integer", "minimum": 0 },
+        "scheduler_lateness_total_ms": { "type": "integer", "minimum": 0 },
+        "scheduler_lateness_max_ms": { "type": "integer", "minimum": 0 },
+        "last_outcome": {
+          "enum": [
+            "none",
+            "in_flight",
+            "echo_reply",
+            "ttl_expired",
+            "destination_unreachable",
+            "packet_too_big",
+            "icmp_error",
+            "timeout",
+            "local_error",
+            "scheduler_skipped",
+            "cached",
+            "late_discarded",
+            "post_destination_discarded"
+          ]
+        },
+        "last_error_code": { "type": "integer", "minimum": 0 },
+        "best_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "average_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "worst_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "last_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "jitter_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "recent_jitter_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "stddev_ms": { "$ref": "#/$defs/nullableMilliseconds" },
+        "country": { "type": "string" },
+        "asn": { "type": "string" },
+        "isp": { "type": "string" },
+        "metadata_source": { "type": "string" },
+        "metadata_failure_reason": { "type": "string" },
+        "responders": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/responder" }
+        }
+      }
+    }
+  }
+}

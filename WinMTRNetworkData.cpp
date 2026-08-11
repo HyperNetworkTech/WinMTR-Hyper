@@ -658,23 +658,16 @@ bool isPublicAddress(const std::wstring& address) noexcept
 }
 
 IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopToken,
-	bool resolveHostname, bool allowHttpFallback)
+	bool resolveHostname, bool allowSecondaryHttpFallback)
 {
 	IpConnectionInfo result;
 	if (!isPublicAddress(address) || stopToken.stop_requested()) return result;
 	SOCKADDR_INET parsed{};
 	(void)parseAddress(address, parsed);
-	const auto [asn, provider] = queryCymru(address);
-	if (!asn.empty()) {
-		result.address = address;
-		result.asn = asn;
-		result.isp = provider;
-		result.source = WinMTRBranding::sources::team_cymru_name;
-	}
 	const auto primaryName = parsed.si_family == AF_INET6
 		? WinMTRBranding::sources::ipinfo_ipv6_name
 		: WinMTRBranding::sources::ipinfo_ipv4_name;
-	if (!result.available() && allowHttpFallback) {
+	if (!stopToken.stop_requested()) {
 		if (const auto body = httpGet(primaryName,
 			L"/" + percentEncode(address) + L"/json", stopToken)) {
 			auto candidate = parseIpInfo(*body);
@@ -685,7 +678,18 @@ IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopT
 			}
 		}
 	}
-	if (!result.available() && allowHttpFallback && !stopToken.stop_requested()) {
+	// Keep each record internally consistent: only select a fallback after the
+	// ipinfo response is wholly unavailable or unusable, and never merge fields.
+	if (!result.available() && !stopToken.stop_requested()) {
+		const auto [asn, provider] = queryCymru(address);
+		if (!asn.empty()) {
+			result.address = address;
+			result.asn = asn;
+			result.isp = provider;
+			result.source = WinMTRBranding::sources::team_cymru_name;
+		}
+	}
+	if (!result.available() && allowSecondaryHttpFallback && !stopToken.stop_requested()) {
 		if (const auto body = httpGet(WinMTRBranding::sources::ipapi_name,
 			L"/" + percentEncode(address) + L"/json/", stopToken)) {
 			auto candidate = parseIpApi(*body);
@@ -697,9 +701,9 @@ IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopT
 		}
 	}
 	if (!result.available() && !stopToken.stop_requested()) {
-		result.failureReason = allowHttpFallback
-			? L"Team Cymru DNS and configured HTTPS providers returned no usable metadata"
-			: L"Team Cymru DNS returned no usable metadata; HTTPS fallback is disabled for hops";
+		result.failureReason = allowSecondaryHttpFallback
+			? L"ipinfo and all configured fallback providers returned no usable metadata"
+			: L"ipinfo and Team Cymru returned no usable metadata; secondary HTTPS fallback is disabled";
 	}
 	finalize(result, stopToken, resolveHostname);
 	return result;

@@ -23,6 +23,7 @@ import <optional>;
 import <sstream>;
 import <string>;
 import <string_view>;
+import <utility>;
 import <vector>;
 import <cstring>;
 import WinMTRIPUtils;
@@ -75,6 +76,8 @@ namespace {
 
 struct ExportRow final {
 	std::array<std::wstring, 14> cells;
+	std::wstring kind = L"hop";
+	std::wstring ip;
 	bool responder = false;
 };
 
@@ -117,6 +120,7 @@ struct ExportRow final {
 	for (const auto& hop : snapshot.hops) {
 		ExportRow row;
 		row.cells[0] = primaryHost(hop);
+		row.ip = addr_to_string(hop.addr);
 		row.cells[1] = std::to_wstring(hop.hop);
 		row.cells[2] = std::format(L"{:.0f}%", hop.getLossPercent());
 		row.cells[3] = std::to_wstring(hop.xmit);
@@ -137,6 +141,8 @@ struct ExportRow final {
 		for (size_t index = 1; index < hop.responders.size(); ++index) {
 			const auto& responder = hop.responders[index];
 			ExportRow alternative;
+			alternative.kind = L"responder";
+			alternative.ip = addr_to_string(responder.addr);
 			alternative.responder = true;
 			alternative.cells[0] = L"  + " + responder.getName();
 			alternative.cells[1] = std::to_wstring(hop.hop);
@@ -228,8 +234,16 @@ struct ExportRow final {
 	return out.str();
 }
 
-[[nodiscard]] std::wstring csvCell(std::wstring_view value)
+[[nodiscard]] std::wstring csvCell(std::wstring_view value, bool protectFormula = true)
 {
+	std::wstring protectedValue;
+	if (protectFormula && !value.empty() && (value.front() == L'=' || value.front() == L'+'
+		|| value.front() == L'-' || value.front() == L'@')) {
+		protectedValue.reserve(value.size() + 1);
+		protectedValue.push_back(L'\'');
+		protectedValue.append(value);
+		value = protectedValue;
+	}
 	if (value.find_first_of(L",\"\r\n") == std::wstring_view::npos) return std::wstring(value);
 	std::wstring result = L"\"";
 	for (const wchar_t ch : value) {
@@ -244,16 +258,18 @@ struct ExportRow final {
 {
 	const auto headers = exportHeaders();
 	std::wostringstream out;
-	out << L"started_at_utc,ended_at_utc,duration_ms,";
+	out << L"target,session_id,row_kind,ip,started_at_utc,ended_at_utc,duration_ms,";
 	for (size_t index = 0; index < headers.size(); ++index) {
 		if (index != 0) out << L',';
 		out << csvCell(headers[index]);
 	}
 	out << L"\r\n";
 	for (const auto& row : makeRows(snapshot)) {
-		out << csvCell(isoUtcTimestamp(snapshot.started_at_unix_ms)) << L',';
+		out << csvCell(snapshot.target) << L',' << snapshot.session_id << L','
+			<< csvCell(row.kind, false) << L',' << csvCell(row.ip) << L','
+			<< csvCell(isoUtcTimestamp(snapshot.started_at_unix_ms), false) << L',';
 		if (snapshot.ended_at_unix_ms != 0) {
-			out << csvCell(isoUtcTimestamp(snapshot.ended_at_unix_ms));
+			out << csvCell(isoUtcTimestamp(snapshot.ended_at_unix_ms), false);
 		}
 		out << L',' << snapshot.duration_ms << L',';
 		for (size_t index = 0; index < row.cells.size(); ++index) {
@@ -268,7 +284,23 @@ struct ExportRow final {
 [[nodiscard]] std::wstring jsonEscape(std::wstring_view value)
 {
 	std::wstring result;
-	for (const wchar_t ch : value) {
+	for (size_t index = 0; index < value.size(); ++index) {
+		const wchar_t ch = value[index];
+		if (ch >= 0xd800 && ch <= 0xdbff) {
+			if (index + 1 < value.size() && value[index + 1] >= 0xdc00
+				&& value[index + 1] <= 0xdfff) {
+				result.push_back(ch);
+				result.push_back(value[++index]);
+			}
+			else {
+				result += L"\\ufffd";
+			}
+			continue;
+		}
+		if (ch >= 0xdc00 && ch <= 0xdfff) {
+			result += L"\\ufffd";
+			continue;
+		}
 		switch (ch) {
 		case L'"': result += L"\\\""; break;
 		case L'\\': result += L"\\\\"; break;
@@ -286,10 +318,16 @@ struct ExportRow final {
 	return result;
 }
 
+[[nodiscard]] std::wstring nullableNumber(bool available, std::wstring value)
+{
+	return available ? std::move(value) : L"null";
+}
+
 [[nodiscard]] std::wstring serializeJson(const WinMTRTraceSnapshot& snapshot)
 {
 	std::wostringstream out;
 	out << L"{\r\n  \"schema_version\": 1,"
+		<< L"\r\n  \"session_id\": " << snapshot.session_id << L','
 		<< L"\r\n  \"statistics\": {\"loss\":\"timed_out/completed\","
 		<< L"\"stddev\":\"sample_standard_deviation\","
 		<< L"\"jitter\":\"ewma_absolute_consecutive_delta_alpha_1_16\"},"
@@ -326,13 +364,20 @@ struct ExportRow final {
 			<< L"\"scheduler_lateness_max_ms\":" << hop.scheduler_lateness_max_ms << L','
 			<< L"\"last_outcome\":\"" << outcomeName(hop.last_outcome) << L"\","
 			<< L"\"last_error_code\":" << hop.last_error_code << L','
-			<< L"\"best_ms\":" << hop.best << L','
-			<< L"\"average_ms\":" << std::format(L"{:.2f}", hop.getAverageMs()) << L','
-			<< L"\"worst_ms\":" << hop.worst << L','
-			<< L"\"last_ms\":" << hop.last << L','
-			<< L"\"jitter_ms\":" << std::format(L"{:.2f}", hop.jitter) << L','
-			<< L"\"recent_jitter_ms\":" << std::format(L"{:.2f}", hop.recent_jitter_ms) << L','
-			<< L"\"stddev_ms\":" << std::format(L"{:.2f}", hop.stddev) << L','
+			<< L"\"best_ms\":" << nullableNumber(hop.returned != 0,
+				std::to_wstring(hop.best)) << L','
+			<< L"\"average_ms\":" << nullableNumber(hop.returned != 0,
+				std::format(L"{:.2f}", hop.getAverageMs())) << L','
+			<< L"\"worst_ms\":" << nullableNumber(hop.returned != 0,
+				std::to_wstring(hop.worst)) << L','
+			<< L"\"last_ms\":" << nullableNumber(hop.returned != 0,
+				std::to_wstring(hop.last)) << L','
+			<< L"\"jitter_ms\":" << nullableNumber(hop.returned != 0,
+				std::format(L"{:.2f}", hop.jitter)) << L','
+			<< L"\"recent_jitter_ms\":" << nullableNumber(hop.returned != 0,
+				std::format(L"{:.2f}", hop.recent_jitter_ms)) << L','
+			<< L"\"stddev_ms\":" << nullableNumber(hop.returned != 0,
+				std::format(L"{:.2f}", hop.stddev)) << L','
 			<< L"\"country\":\"" << jsonEscape(hop.country) << L"\","
 			<< L"\"asn\":\"" << jsonEscape(hop.asn) << L"\","
 			<< L"\"isp\":\"" << jsonEscape(hop.isp) << L"\","
@@ -407,19 +452,75 @@ struct ExportRow final {
 		startHtml, endHtml, startFragment, endFragment, body);
 }
 
-[[nodiscard]] bool writeUtf8File(const CString& path, std::wstring_view contents, bool bom)
+bool writeAll(HANDLE file, const void* data, size_t size, DWORD& error) noexcept
 {
+	const auto* cursor = static_cast<const std::byte*>(data);
+	while (size != 0) {
+		const DWORD requested = static_cast<DWORD>(std::min<size_t>(size, MAXDWORD));
+		DWORD written = 0;
+		if (!WriteFile(file, cursor, requested, &written, nullptr) || written == 0) {
+			error = GetLastError();
+			if (error == ERROR_SUCCESS) error = ERROR_WRITE_FAULT;
+			return false;
+		}
+		cursor += written;
+		size -= written;
+	}
+	return true;
+}
+
+[[nodiscard]] DWORD writeUtf8File(const CString& path, std::wstring_view contents, bool bom)
+{
+	CString directory(path);
+	const int separator = std::max(directory.ReverseFind(L'\\'), directory.ReverseFind(L'/'));
+	if (separator >= 0) directory = directory.Left(separator);
+	else directory = L".";
+	wchar_t temporaryPath[MAX_PATH]{};
+	if (GetTempFileNameW(directory, L"wmt", 0, temporaryPath) == 0) return GetLastError();
+	HANDLE file = CreateFileW(temporaryPath, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+		FILE_ATTRIBUTE_TEMPORARY, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		const DWORD error = GetLastError();
+		DeleteFileW(temporaryPath);
+		return error;
+	}
+	DWORD error = ERROR_SUCCESS;
 	const auto bytes = toUtf8(contents);
-	HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (file == INVALID_HANDLE_VALUE) return false;
-	struct FileCloser final { HANDLE value; ~FileCloser() { CloseHandle(value); } } closer{ file };
-	DWORD written = 0;
 	if (bom) {
 		constexpr unsigned char marker[]{ 0xef, 0xbb, 0xbf };
-		if (!WriteFile(file, marker, sizeof(marker), &written, nullptr) || written != sizeof(marker)) return false;
+		writeAll(file, marker, sizeof(marker), error);
 	}
-	return bytes.empty() || (WriteFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr)
-		&& written == bytes.size());
+	if (error == ERROR_SUCCESS && !bytes.empty()) {
+		writeAll(file, bytes.data(), bytes.size(), error);
+	}
+	if (error == ERROR_SUCCESS && !FlushFileBuffers(file)) error = GetLastError();
+	if (!CloseHandle(file) && error == ERROR_SUCCESS) error = GetLastError();
+	if (error == ERROR_SUCCESS && !MoveFileExW(temporaryPath, path,
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+		error = GetLastError();
+	}
+	if (error != ERROR_SUCCESS) DeleteFileW(temporaryPath);
+	return error;
+}
+
+[[nodiscard]] CString systemErrorMessage(DWORD error)
+{
+	wchar_t* buffer = nullptr;
+	const DWORD length = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER
+		| FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error,
+		MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), reinterpret_cast<wchar_t*>(&buffer), 0, nullptr);
+	CString message = length == 0 || buffer == nullptr ? L"Unknown error" : buffer;
+	if (buffer != nullptr) LocalFree(buffer);
+	message.Trim();
+	return message;
+}
+
+void showExportError(const CString& path, DWORD error)
+{
+	CString message;
+	message.Format(L"%s\r\n\r\n%s\r\n%s (%lu)", localized(IDS_ERROR_EXPORT).GetString(),
+		path.GetString(), systemErrorMessage(error).GetString(), error);
+	AfxMessageBox(message, MB_OK | MB_ICONERROR);
 }
 
 [[nodiscard]] CString makeExportFilter(UINT typeId, const wchar_t* pattern)
@@ -483,8 +584,9 @@ void WinMTRDialog::exportText()
 {
 	if (!confirmShare()) return;
 	const auto path = selectExportPath(this, L"txt", makeExportFilter(IDS_FILE_TYPE_TEXT, L"*.txt"));
-	if (!path.IsEmpty() && !writeUtf8File(path, serializeText(wmtrnet->getTraceSnapshot()), true)) {
-		AfxMessageBox(IDS_ERROR_EXPORT, MB_OK | MB_ICONERROR);
+	if (!path.IsEmpty()) {
+		if (const DWORD error = writeUtf8File(path, serializeText(wmtrnet->getTraceSnapshot()), true);
+			error != ERROR_SUCCESS) showExportError(path, error);
 	}
 }
 
@@ -492,8 +594,9 @@ void WinMTRDialog::exportHtml()
 {
 	if (!confirmShare()) return;
 	const auto path = selectExportPath(this, L"html", makeExportFilter(IDS_FILE_TYPE_HTML, L"*.html;*.htm"));
-	if (!path.IsEmpty() && !writeUtf8File(path, serializeHtml(wmtrnet->getTraceSnapshot(), true), false)) {
-		AfxMessageBox(IDS_ERROR_EXPORT, MB_OK | MB_ICONERROR);
+	if (!path.IsEmpty()) {
+		if (const DWORD error = writeUtf8File(path, serializeHtml(wmtrnet->getTraceSnapshot(), true), false);
+			error != ERROR_SUCCESS) showExportError(path, error);
 	}
 }
 
@@ -501,8 +604,9 @@ void WinMTRDialog::exportCsv()
 {
 	if (!confirmShare()) return;
 	const auto path = selectExportPath(this, L"csv", makeExportFilter(IDS_FILE_TYPE_CSV, L"*.csv"));
-	if (!path.IsEmpty() && !writeUtf8File(path, serializeCsv(wmtrnet->getTraceSnapshot()), true)) {
-		AfxMessageBox(IDS_ERROR_EXPORT, MB_OK | MB_ICONERROR);
+	if (!path.IsEmpty()) {
+		if (const DWORD error = writeUtf8File(path, serializeCsv(wmtrnet->getTraceSnapshot()), true);
+			error != ERROR_SUCCESS) showExportError(path, error);
 	}
 }
 
@@ -510,8 +614,9 @@ void WinMTRDialog::exportJson()
 {
 	if (!confirmShare()) return;
 	const auto path = selectExportPath(this, L"json", makeExportFilter(IDS_FILE_TYPE_JSON, L"*.json"));
-	if (!path.IsEmpty() && !writeUtf8File(path, serializeJson(wmtrnet->getTraceSnapshot()), false)) {
-		AfxMessageBox(IDS_ERROR_EXPORT, MB_OK | MB_ICONERROR);
+	if (!path.IsEmpty()) {
+		if (const DWORD error = writeUtf8File(path, serializeJson(wmtrnet->getTraceSnapshot()), false);
+			error != ERROR_SUCCESS) showExportError(path, error);
 	}
 }
 

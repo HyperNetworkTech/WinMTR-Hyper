@@ -68,7 +68,7 @@ struct CurrentNetworkInfo final {
 [[nodiscard]] CurrentNetworkInfo queryCurrent(std::stop_token stopToken = {});
 [[nodiscard]] IpConnectionInfo queryAddress(const std::wstring& address,
 	std::stop_token stopToken = {}, bool resolveHostname = true,
-	bool allowHttpFallback = false);
+	bool allowSecondaryHttpFallback = false);
 [[nodiscard]] std::wstring formatDetails(const CurrentNetworkInfo& info);
 [[nodiscard]] bool isPublicAddress(const std::wstring& address) noexcept;
 

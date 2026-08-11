@@ -66,17 +66,6 @@ WinMTRTraceSnapshot WinMTRNet::getTraceSnapshot() const
 	}
 	const auto first_index = static_cast<std::size_t>(session_start_ttl - 1);
 	auto end_index = std::min<std::size_t>(display_max_ttl, host.size());
-	if (completed_cycles == 0) {
-		// Probes in a round run concurrently. Publish only the completed prefix
-		// during the first round so rows appear hop-by-hop without temporarily
-		// labelling an unfinished lower TTL as an unknown host.
-		for (size_t index = first_index; index < end_index; ++index) {
-			if (host[index].xmit == 0) {
-				end_index = index;
-				break;
-			}
-		}
-	}
 	snapshot.hops.assign(host.begin() + first_index, host.begin() + end_index);
 	for (const auto& hop : snapshot.hops) {
 		if (hop.xmit != 0) {

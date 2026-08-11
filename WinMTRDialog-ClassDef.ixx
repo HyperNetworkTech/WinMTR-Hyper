@@ -15,6 +15,7 @@ module;
 
 export module WinMTR.Dialog:ClassDef;
 
+import <array>;
 import <atomic>;
 import <cstddef>;
 import <cstdint>;
@@ -121,6 +122,9 @@ private:
 	bool firstDataResize = true;
 	std::size_t lastAutoRowCount = 0;
 	int naturalColumnsWidth = 0;
+	std::array<int, 14> automaticColumnWidths{};
+	bool userSizedColumns = false;
+	bool publicInfoAutoSized = false;
 	int topContentBottom = 0;
 
 	std::wstring defaultHostname;

@@ -30,6 +30,7 @@ constexpr wchar_t rootKeyName[] = LR"(Software\WinMTR)";
 constexpr wchar_t configKeyName[] = LR"(Software\WinMTR\Config)";
 constexpr wchar_t historyKeyName[] = LR"(Software\WinMTR\LRU)";
 constexpr wchar_t historyCountName[] = L"NrLRU";
+constexpr DWORD currentSettingsSchemaVersion = 1;
 
 [[nodiscard]] CString localized(UINT id)
 {
@@ -106,6 +107,13 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 
 	CRegKey config;
 	if (config.Create(HKEY_CURRENT_USER, configKeyName) != ERROR_SUCCESS) return FALSE;
+	DWORD settingsSchemaVersion = 0;
+	if (config.QueryDWORDValue(L"SettingsSchemaVersion", settingsSchemaVersion) != ERROR_SUCCESS
+		|| settingsSchemaVersion < currentSettingsSchemaVersion) {
+		// Version 1 formalizes the existing value names and ranges. Older installs
+		// already use the same representation, so migration only needs to stamp it.
+		config.SetDWORDValue(L"SettingsSchemaVersion", currentSettingsSchemaVersion);
+	}
 	if (!hasPacketSizeFromCommandLine) packetSize = std::clamp<unsigned>(queryDword(config, L"PingSize",
 		WinMTRUtils::DEFAULT_PING_SIZE), WinMTRUtils::MIN_PING_SIZE, WinMTRUtils::MAX_PING_SIZE);
 	persistentHistoryLimit = std::clamp<unsigned>(queryDword(config, L"MaxLRU",
@@ -144,29 +152,8 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 	dontFragment = queryDword(config, L"DontFragment", WinMTRUtils::DEFAULT_DONT_FRAGMENT) != 0;
 	useIPv4 = queryDword(config, L"UseIPv4", WinMTRUtils::DEFAULT_USE_IPV4) != 0;
 	useIPv6 = queryDword(config, L"UseIPv6", WinMTRUtils::DEFAULT_USE_IPV6) != 0;
-	DWORD publicInfoConsentShown = 0;
-	const bool hasPublicInfoConsent = config.QueryDWORDValue(
-		L"PublicInfoConsentShown", publicInfoConsentShown) == ERROR_SUCCESS
-		&& publicInfoConsentShown != 0;
-	if (!hasPublicInfoConsent) {
-		const auto consent = AfxMessageBox(
-			L"目前公網資訊與節點 ASN/業者查詢會連線至 Team Cymru、ipinfo.io "
-			L"與 whoami.ds.akahelp.net；只有主要來源完全無法使用時才會連線備援服務，"
-			L"且不會混合不同 HTTP 來源的欄位。\r\n\r\n是否啟用這些外部查詢？"
-			L"之後可隨時在「選項」中關閉。",
-			MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2);
-		queryPublicInfo = consent == IDYES;
-		config.SetDWORDValue(L"QueryPublicInfo", queryPublicInfo.load() ? 1 : 0);
-		if (consent != IDYES) {
-			lookupAsnIsp = false;
-			config.SetDWORDValue(L"LookupAsnIsp", 0);
-		}
-		config.SetDWORDValue(L"PublicInfoConsentShown", 1);
-	}
-	else {
-		queryPublicInfo = queryDword(config, L"QueryPublicInfo",
-			WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO) != 0;
-	}
+	queryPublicInfo = queryDword(config, L"QueryPublicInfo",
+		WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO) != 0;
 	publicInfoRefreshMode = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMode",
 		WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE),
 		WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE,
@@ -195,6 +182,7 @@ void WinMTRDialog::SaveSettings() noexcept
 {
 	CRegKey config;
 	if (config.Create(HKEY_CURRENT_USER, configKeyName) != ERROR_SUCCESS) return;
+	config.SetDWORDValue(L"SettingsSchemaVersion", currentSettingsSchemaVersion);
 	config.SetDWORDValue(L"PingSize", packetSize.load());
 	config.SetDWORDValue(L"MaxLRU", historyLimit);
 	config.SetDWORDValue(L"UseDNS", resolveNames.load() ? 1 : 0);

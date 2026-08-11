@@ -39,6 +39,13 @@ using namespace std::literals;
 
 namespace {
 
+[[nodiscard]] bool highContrastEnabled() noexcept
+{
+	HIGHCONTRASTW value{ .cbSize = sizeof(HIGHCONTRASTW) };
+	return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(value), &value, 0)
+		&& (value.dwFlags & HCF_HIGHCONTRASTON) != 0;
+}
+
 [[nodiscard]] UINT effectiveDpi(HWND window) noexcept
 {
 	using GetDpiForWindowFunction = UINT(WINAPI*)(HWND);
@@ -504,12 +511,13 @@ BOOL WinMTRDialog::OnInitDialog()
 
 	configureList();
 	applyTechnicalFonts(effectiveDpi(GetSafeHwnd()));
-	// The themed group-box interior is white while ordinary dialog labels use
-	// COLOR_3DFACE. Use the classic group-box frame only for these containers so
-	// captions, values and the surrounding dialog share one background colour.
-	for (const int id : { IDC_GROUP_TARGET, IDC_GROUP_ACTIONS, IDC_GROUP_PUBLIC_INFO }) {
-		if (CWnd* group = GetDlgItem(id); group != nullptr) {
-			SetWindowTheme(group->GetSafeHwnd(), L"", L"");
+	if (!highContrastEnabled()) {
+		// The themed group-box interior is white while ordinary dialog labels use
+		// COLOR_3DFACE. In high contrast mode, retain system theme painting.
+		for (const int id : { IDC_GROUP_TARGET, IDC_GROUP_ACTIONS, IDC_GROUP_PUBLIC_INFO }) {
+			if (CWnd* group = GetDlgItem(id); group != nullptr) {
+				SetWindowTheme(group->GetSafeHwnd(), L"", L"");
+			}
 		}
 	}
 	InitRegistry();
@@ -548,6 +556,8 @@ BOOL WinMTRDialog::OnInitDialog()
 
 void WinMTRDialog::configureList()
 {
+	automaticColumnWidths.fill(0);
+	userSizedColumns = false;
 	listMtr.SetExtendedStyle(listMtr.GetExtendedStyle() | LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES |
 		LVS_EX_DOUBLEBUFFER);
 	for (int index = 0; index < static_cast<int>(columnStringIds.size()); ++index) {
@@ -875,9 +885,14 @@ BOOL WinMTRDialog::OnNotify(WPARAM wParam, LPARAM lParam, LRESULT* result)
 	const auto* notification = reinterpret_cast<const NMHDR*>(lParam);
 	const HWND header = ::IsWindow(listMtr.GetSafeHwnd()) ? ListView_GetHeader(listMtr.GetSafeHwnd()) : nullptr;
 	if (notification != nullptr && notification->hwndFrom == header
-		&& (notification->code == HDN_BEGINTRACKA || notification->code == HDN_BEGINTRACKW)) {
-		if (result != nullptr) *result = TRUE;
-		return TRUE;
+		&& (notification->code == HDN_ENDTRACKA || notification->code == HDN_ENDTRACKW)) {
+		userSizedColumns = true;
+		naturalColumnsWidth = scaled(GetSafeHwnd(), 8);
+		for (int column = 0; column < 14; ++column) {
+			automaticColumnWidths[static_cast<std::size_t>(column)] =
+				listMtr.GetColumnWidth(column);
+			naturalColumnsWidth += listMtr.GetColumnWidth(column);
+		}
 	}
 	return CDialog::OnNotify(wParam, lParam, result);
 }
@@ -892,6 +907,8 @@ LRESULT WinMTRDialog::OnDpiChanged(WPARAM newDpi, LPARAM suggestedRect)
 	}
 	const UINT dpi = LOWORD(newDpi);
 	applyTechnicalFonts(dpi);
+	automaticColumnWidths.fill(0);
+	userSizedColumns = false;
 	if (::IsWindow(statusBar.GetSafeHwnd())) {
 		statusBar.GetStatusBarCtrl().SetMinHeight(MulDiv(25, static_cast<int>(dpi), 96));
 		statusBar.SetPaneInfo(1, statusBar.GetItemID(1), SBPS_NORMAL,
@@ -937,6 +954,7 @@ BOOL WinMTRDialog::OnEraseBkgnd(CDC* dc)
 HBRUSH WinMTRDialog::OnCtlColor(CDC* dc, CWnd* window, UINT controlType)
 {
 	HBRUSH brush = CDialog::OnCtlColor(dc, window, controlType);
+	if (highContrastEnabled()) return brush;
 	const int id = window == nullptr ? 0 : window->GetDlgCtrlID();
 	const bool isGroupBox = id == IDC_GROUP_TARGET || id == IDC_GROUP_ACTIONS
 		|| id == IDC_GROUP_PUBLIC_INFO;
@@ -1016,6 +1034,14 @@ int WinMTRDialog::DisplayRedraw()
 	if (snapshot.revision == lastRenderedRevision) return 0;
 	lastRenderedRevision = snapshot.revision;
 	if (state == STATES::TRACING) setStatus(loadString(IDS_STATUS_TRACING));
+	else if (state == STATES::STOPPING) {
+		const auto inFlight = std::accumulate(snapshot.hops.begin(), snapshot.hops.end(),
+			std::uint64_t{ 0 }, [](std::uint64_t total, const s_nethost& hop) {
+				return total + hop.in_flight;
+			});
+		setStatus(std::format(L"{}（尚有 {} 個探測）",
+			loadString(IDS_STATUS_WAITING_PACKETS).GetString(), inFlight).c_str());
+	}
 
 	std::optional<DisplayRow> selectedRow;
 	if (POSITION selectedPosition = listMtr.GetFirstSelectedItemPosition(); selectedPosition != nullptr) {
@@ -1024,12 +1050,18 @@ int WinMTRDialog::DisplayRedraw()
 			selectedRow = displayRows[static_cast<size_t>(selectedIndex)];
 		}
 	}
-	listMtr.SetRedraw(FALSE);
-	listMtr.DeleteAllItems();
-	displayRows.clear();
+	std::vector<DisplayRow> nextDisplayRows;
+	std::vector<std::array<std::wstring, 14>> nextCells;
 	const auto empty = L"";
 	const auto setCell = [&](int row, int column, const std::wstring& value) {
-		listMtr.SetItemText(row, column, value.c_str());
+		nextCells[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)] = value;
+	};
+	const auto appendRow = [&](std::wstring label, DisplayRow descriptor) {
+		const int row = static_cast<int>(nextCells.size());
+		nextCells.emplace_back();
+		nextCells.back()[0] = std::move(label);
+		nextDisplayRows.push_back(std::move(descriptor));
+		return row;
 	};
 	const auto setStatistics = [&](int row, const s_nethost& hop) {
 		setCell(row, 2, std::format(L"{:.0f}%", hop.getLossPercent()));
@@ -1045,17 +1077,27 @@ int WinMTRDialog::DisplayRedraw()
 
 	for (size_t index = 0; index < snapshot.hops.size();) {
 		const auto& hop = snapshot.hops[index];
+		if (hop.completed == 0 && hop.in_flight != 0 && hop.responders.empty()) {
+			const int row = appendRow(L"等待回覆中…",
+				{ DisplayRowKind::primary, hop.hop, hop.hop, 0 });
+			setCell(row, 1, std::to_wstring(hop.hop));
+			setStatistics(row, hop);
+			++index;
+			continue;
+		}
 		if (hop.returned == 0 && hop.responders.empty()) {
 			size_t end = index;
-			while (end + 1 < snapshot.hops.size() && snapshot.hops[end + 1].returned == 0 &&
-				snapshot.hops[end + 1].responders.empty()) ++end;
+			while (end + 1 < snapshot.hops.size()
+				&& snapshot.hops[end + 1].returned == 0
+				&& snapshot.hops[end + 1].in_flight == 0
+				&& snapshot.hops[end + 1].responders.empty()) ++end;
 			const unsigned firstHop = hop.hop;
 			const unsigned lastHop = snapshot.hops[end].hop;
 			const CString noResponse = loadString(IDS_STRING_NO_RESPONSE_FROM_HOST);
-			const int row = listMtr.InsertItem(listMtr.GetItemCount(), noResponse.GetString());
+			const int row = appendRow(noResponse.GetString(),
+				{ DisplayRowKind::unknown_range, firstHop, lastHop, 0 });
 			setCell(row, 1, firstHop == lastHop ? std::to_wstring(firstHop)
 				: std::format(L"{}-{}", firstHop, lastHop));
-			displayRows.push_back({ DisplayRowKind::unknown_range, firstHop, lastHop, 0 });
 			index = end + 1;
 			continue;
 		}
@@ -1063,28 +1105,49 @@ int WinMTRDialog::DisplayRedraw()
 		std::wstring primaryName = hop.getName();
 		if (primaryName.empty() && !hop.responders.empty()) primaryName = hop.responders.front().getName();
 		if (primaryName.empty()) primaryName = loadString(IDS_STRING_NO_RESPONSE_FROM_HOST).GetString();
-		const int row = listMtr.InsertItem(listMtr.GetItemCount(), primaryName.c_str());
+		const int row = appendRow(std::move(primaryName),
+			{ DisplayRowKind::primary, hop.hop, hop.hop, 0 });
 		setCell(row, 1, std::to_wstring(hop.hop));
 		setStatistics(row, hop);
 		setCell(row, 11, hop.country);
 		setCell(row, 12, hop.asn);
 		setCell(row, 13, hop.isp);
-		displayRows.push_back({ DisplayRowKind::primary, hop.hop, hop.hop, 0 });
 
 		const size_t visibleResponders = std::min<size_t>(hop.responders.size(), ecmpDisplayLimit.load());
 		for (size_t responderIndex = 1; responderIndex < visibleResponders; ++responderIndex) {
 			const auto& responder = hop.responders[responderIndex];
-			const int responderRow = listMtr.InsertItem(listMtr.GetItemCount(),
-				(L"  + " + responder.getName()).c_str());
+			const int responderRow = appendRow(L"  + " + responder.getName(),
+				{ DisplayRowKind::responder, hop.hop, hop.hop, responderIndex,
+					addr_to_string(responder.addr) });
 			setCell(responderRow, 1, std::to_wstring(hop.hop));
 			setCell(responderRow, 11, responder.country);
 			setCell(responderRow, 12, responder.asn);
 			setCell(responderRow, 13, responder.isp);
-			displayRows.push_back({ DisplayRowKind::responder, hop.hop, hop.hop,
-				responderIndex, addr_to_string(responder.addr) });
 		}
 		++index;
 	}
+
+	const auto sameRowKey = [](const DisplayRow& lhs, const DisplayRow& rhs) {
+		return lhs.kind == rhs.kind && lhs.firstHop == rhs.firstHop
+			&& lhs.lastHop == rhs.lastHop && lhs.responderAddress == rhs.responderAddress;
+	};
+	const bool sameStructure = displayRows.size() == nextDisplayRows.size()
+		&& std::equal(displayRows.begin(), displayRows.end(), nextDisplayRows.begin(), sameRowKey);
+	listMtr.SetRedraw(FALSE);
+	if (!sameStructure) listMtr.DeleteAllItems();
+	for (int row = 0; row < static_cast<int>(nextCells.size()); ++row) {
+		if (!sameStructure) {
+			listMtr.InsertItem(row, nextCells[static_cast<std::size_t>(row)][0].c_str());
+		}
+		for (int column = sameStructure ? 0 : 1; column < 14; ++column) {
+			const auto& next = nextCells[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)];
+			const CString current = listMtr.GetItemText(row, column);
+			if (!sameStructure || current.Compare(next.c_str()) != 0) {
+				listMtr.SetItemText(row, column, next.c_str());
+			}
+		}
+	}
+	displayRows = std::move(nextDisplayRows);
 
 	if (!listIsVisible && !displayRows.empty()) {
 		listIsVisible = true;
@@ -1092,12 +1155,18 @@ int WinMTRDialog::DisplayRedraw()
 	}
 	naturalColumnsWidth = scaled(GetSafeHwnd(), 8);
 	for (int column = 0; column < 14; ++column) {
-		listMtr.SetColumnWidth(column, LVSCW_AUTOSIZE);
-		const int dataWidth = listMtr.GetColumnWidth(column);
-		const auto title = loadString(columnStringIds[static_cast<size_t>(column)]);
-		const int headerWidth = listMtr.GetStringWidth(title) + scaled(GetSafeHwnd(), 24);
-		const int measuredWidth = std::max(dataWidth, headerWidth) + scaled(GetSafeHwnd(), 6);
-		listMtr.SetColumnWidth(column, measuredWidth);
+		int measuredWidth = listMtr.GetColumnWidth(column);
+		if (!userSizedColumns) {
+			listMtr.SetColumnWidth(column, LVSCW_AUTOSIZE);
+			const int dataWidth = listMtr.GetColumnWidth(column);
+			const auto title = loadString(columnStringIds[static_cast<size_t>(column)]);
+			const int headerWidth = listMtr.GetStringWidth(title) + scaled(GetSafeHwnd(), 24);
+			const int contentWidth = std::max(dataWidth, headerWidth) + scaled(GetSafeHwnd(), 6);
+			auto& remembered = automaticColumnWidths[static_cast<std::size_t>(column)];
+			remembered = std::max(remembered, contentWidth);
+			measuredWidth = remembered;
+			listMtr.SetColumnWidth(column, measuredWidth);
+		}
 		naturalColumnsWidth += measuredWidth;
 	}
 	if (selectedRow) {
@@ -1132,14 +1201,14 @@ void WinMTRDialog::adjustWindowForRows()
 	GetMonitorInfoW(MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST), &monitor);
 	const int maximumWidth = monitor.rcWork.right - monitor.rcWork.left;
 	const int maximumHeight = monitor.rcWork.bottom - monitor.rcWork.top;
-	const bool routeShrank = lastAutoRowCount != 0 && displayRows.size() < lastAutoRowCount;
-	const bool resizeExactly = firstDataResize || routeShrank;
 	const int requiredWidth = static_cast<int>(required.cx);
 	const int requiredHeight = static_cast<int>(required.cy);
-	const int desiredWidth = std::min(maximumWidth,
-		resizeExactly ? requiredWidth : std::max(static_cast<int>(currentWindow.Width()), requiredWidth));
-	const int desiredHeight = std::min(maximumHeight,
-		resizeExactly ? requiredHeight : std::max(static_cast<int>(currentWindow.Height()), requiredHeight));
+	const int desiredWidth = firstDataResize
+		? std::min(maximumWidth, requiredWidth)
+		: static_cast<int>(currentWindow.Width());
+	const int desiredHeight = firstDataResize
+		? std::min(maximumHeight, requiredHeight)
+		: static_cast<int>(currentWindow.Height());
 	const int desiredLeft = std::clamp(static_cast<int>(currentWindow.left), static_cast<int>(monitor.rcWork.left),
 		static_cast<int>(monitor.rcWork.right) - desiredWidth);
 	const int desiredTop = std::clamp(static_cast<int>(currentWindow.top), static_cast<int>(monitor.rcWork.top),
@@ -1333,7 +1402,10 @@ void WinMTRDialog::updateNetworkInfoSummary()
 	CRect client;
 	GetClientRect(client);
 	layoutControls(client.Width(), client.Height());
-	resizeWindowToContent();
+	if (!publicInfoAutoSized && value.anyAvailable()) {
+		publicInfoAutoSized = true;
+		resizeWindowToContent();
+	}
 }
 
 void WinMTRDialog::showNetworkInfoDialog()
