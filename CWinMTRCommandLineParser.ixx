@@ -28,6 +28,7 @@ module;
 #include <afxext.h>
 #include <cerrno>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cwchar>
 #include <string>
@@ -51,6 +52,8 @@ export namespace utils {
 		{
 			return m_help;
 		}
+		[[nodiscard]] bool hasError() const noexcept { return m_error; }
+		void Validate() noexcept;
 
 	private:
 		void ParseParam(const WCHAR* pszParam, BOOL bFlag, BOOL bLast) noexcept override final;
@@ -67,7 +70,18 @@ export namespace utils {
 			none,
 			interval,
 			ping_size,
-			lru
+			lru,
+			max_hops,
+			timeout,
+			cycles,
+			tos,
+			pattern,
+			start_ttl,
+			minimum_ttl,
+			unknown_hosts,
+			ecmp_limit,
+			reply_cache,
+			public_refresh_minutes
 		};
 
 		void ReportError(const wchar_t* prefix, const wchar_t* detail = nullptr) noexcept;
@@ -77,6 +91,7 @@ export namespace utils {
 		WinMTRDialog& dlg;
 		expect_next next = expect_next::none;
 		bool m_help = false;
+		bool m_error = false;
 		bool m_has_target = false;
 	};
 }
@@ -138,6 +153,8 @@ void utils::CWinMTRCommandLineParser::ReportError(
 		if (detail != nullptr) {
 			message.append(detail);
 		}
+		std::fwprintf(stderr, L"%ls\n", message.c_str());
+		std::fflush(stderr);
 		AfxMessageBox(message.c_str(), MB_OK | MB_ICONERROR);
 	}
 	catch (...) {
@@ -146,8 +163,7 @@ void utils::CWinMTRCommandLineParser::ReportError(
 			MB_OK | MB_ICONERROR);
 	}
 
-	// WinMTRMain already displays the help dialog and exits when this flag is
-	// set, so parse failures follow the same safe path after the Chinese error.
+	m_error = true;
 	m_help = true;
 }
 
@@ -177,6 +193,17 @@ const wchar_t* utils::CWinMTRCommandLineParser::PendingOptionName() const noexce
 		return L"--size / -s";
 	case expect_next::lru:
 		return L"--maxLRU / -m";
+	case expect_next::max_hops: return L"--max-hops";
+	case expect_next::timeout: return L"--timeout";
+	case expect_next::cycles: return L"--cycles";
+	case expect_next::tos: return L"--tos";
+	case expect_next::pattern: return L"--pattern";
+	case expect_next::start_ttl: return L"--start-ttl";
+	case expect_next::minimum_ttl: return L"--minimum-ttl";
+	case expect_next::unknown_hosts: return L"--unknown-hosts";
+	case expect_next::ecmp_limit: return L"--ecmp-limit";
+	case expect_next::reply_cache: return L"--cache";
+	case expect_next::public_refresh_minutes: return L"--public-refresh-minutes";
 	case expect_next::none:
 	default:
 		return L"";
@@ -209,6 +236,52 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 			dlg.SetUseDNS(false, WinMTRDialog::options_source::cmd_line);
 			return;
 		}
+		if (IsOption(pszParam, L"", L"resolve")) {
+			dlg.SetUseDNS(true, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"lookup-asn")) {
+			dlg.SetLookupAsnIsp(true, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"no-lookup-asn")) {
+			dlg.SetLookupAsnIsp(false, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"dont-fragment")) {
+			dlg.SetDontFragment(true, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"allow-fragment")) {
+			dlg.SetDontFragment(false, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"ipv4-only")) {
+			dlg.SetAddressFamilies(true, false, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"ipv6-only")) {
+			dlg.SetAddressFamilies(false, true, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"dual-stack")) {
+			dlg.SetAddressFamilies(true, true, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"public-info")) {
+			dlg.SetQueryPublicInfo(true, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"no-public-info")) {
+			dlg.SetQueryPublicInfo(false, WinMTRDialog::options_source::cmd_line);
+			return;
+		}
+		if (IsOption(pszParam, L"", L"public-refresh-on-change")) {
+			dlg.SetPublicInfoRefresh(WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE,
+				WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MINUTES,
+				WinMTRDialog::options_source::cmd_line);
+			return;
+		}
 		if (IsOption(pszParam, L"i", L"interval")) {
 			next = expect_next::interval;
 		}
@@ -217,6 +290,19 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 		}
 		else if (IsOption(pszParam, L"s", L"size")) {
 			next = expect_next::ping_size;
+		}
+		else if (IsOption(pszParam, L"", L"max-hops")) next = expect_next::max_hops;
+		else if (IsOption(pszParam, L"", L"timeout")) next = expect_next::timeout;
+		else if (IsOption(pszParam, L"", L"cycles")) next = expect_next::cycles;
+		else if (IsOption(pszParam, L"", L"tos")) next = expect_next::tos;
+		else if (IsOption(pszParam, L"", L"pattern")) next = expect_next::pattern;
+		else if (IsOption(pszParam, L"", L"start-ttl")) next = expect_next::start_ttl;
+		else if (IsOption(pszParam, L"", L"minimum-ttl")) next = expect_next::minimum_ttl;
+		else if (IsOption(pszParam, L"", L"unknown-hosts")) next = expect_next::unknown_hosts;
+		else if (IsOption(pszParam, L"", L"ecmp-limit")) next = expect_next::ecmp_limit;
+		else if (IsOption(pszParam, L"", L"cache")) next = expect_next::reply_cache;
+		else if (IsOption(pszParam, L"", L"public-refresh-minutes")) {
+			next = expect_next::public_refresh_minutes;
 		}
 		else {
 			try {
@@ -261,6 +347,13 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 	const auto pending = next;
 	const auto option_name = PendingOptionName();
 	next = expect_next::none;
+	const auto parseRangedInteger = [&](long minimum, long maximum, long& parsed) {
+		if (!ParseInteger(pszParam, parsed) || parsed < minimum || parsed > maximum) {
+			ReportInvalidValue(option_name, pszParam);
+			return false;
+		}
+		return true;
+	};
 
 	switch (pending) {
 	case expect_next::lru:
@@ -305,8 +398,123 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 			WinMTRDialog::options_source::cmd_line);
 		break;
 	}
+	case expect_next::max_hops:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_MAX_HOPS,
+			WinMTRUtils::MAX_MAX_HOPS, parsed)) return;
+		dlg.SetMaxHops(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::timeout:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_TIMEOUT_MS,
+			WinMTRUtils::MAX_TIMEOUT_MS, parsed)) return;
+		dlg.SetTimeoutMs(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::cycles:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_CYCLES,
+			WinMTRUtils::MAX_CYCLES, parsed)) return;
+		dlg.SetCycles(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::tos:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_TOS,
+			WinMTRUtils::MAX_TOS, parsed)) return;
+		dlg.SetTos(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::pattern:
+	{
+		if (_wcsicmp(pszParam, L"random") == 0) {
+			dlg.SetPayloadPattern(WinMTRUtils::MIN_PAYLOAD_PATTERN,
+				WinMTRDialog::options_source::cmd_line);
+			break;
+		}
+		long parsed = 0;
+		if (!parseRangedInteger(0, WinMTRUtils::MAX_PAYLOAD_PATTERN, parsed)) return;
+		dlg.SetPayloadPattern(static_cast<int>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::start_ttl:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_START_TTL,
+			WinMTRUtils::MAX_MAX_HOPS, parsed)) return;
+		dlg.SetStartTtl(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::minimum_ttl:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_MINIMUM_TTL,
+			WinMTRUtils::MAX_MAX_HOPS, parsed)) return;
+		dlg.SetMinimumTtl(static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::unknown_hosts:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_UNKNOWN_HOST_LIMIT,
+			WinMTRUtils::MAX_UNKNOWN_HOST_LIMIT, parsed)) return;
+		dlg.SetUnknownHostLimit(static_cast<unsigned>(parsed),
+			WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::ecmp_limit:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_ECMP_DISPLAY_LIMIT,
+			WinMTRUtils::MAX_ECMP_RESPONDERS, parsed)) return;
+		dlg.SetEcmpDisplayLimit(static_cast<unsigned>(parsed),
+			WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::reply_cache:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_REPLY_CACHE_SECONDS,
+			WinMTRUtils::MAX_REPLY_CACHE_SECONDS, parsed)) return;
+		dlg.SetReplyCacheSeconds(static_cast<unsigned>(parsed),
+			WinMTRDialog::options_source::cmd_line);
+		break;
+	}
+	case expect_next::public_refresh_minutes:
+	{
+		long parsed = 0;
+		if (!parseRangedInteger(WinMTRUtils::MIN_PUBLIC_INFO_REFRESH_MINUTES,
+			WinMTRUtils::MAX_PUBLIC_INFO_REFRESH_MINUTES, parsed)) return;
+		dlg.SetPublicInfoRefresh(WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL,
+			static_cast<unsigned>(parsed), WinMTRDialog::options_source::cmd_line);
+		break;
+	}
 	case expect_next::none:
 	default:
 		break;
+	}
+}
+
+void utils::CWinMTRCommandLineParser::Validate() noexcept
+{
+	if (m_error) return;
+	try {
+		if (dlg.getStartTtl() > dlg.getMaxHops()) {
+			ReportError(WinMTRBranding::cli_strings::invalid_value.data(),
+				L"--start-ttl must not exceed --max-hops");
+			return;
+		}
+		if (dlg.getMinimumTtl() > dlg.getMaxHops()) {
+			ReportError(WinMTRBranding::cli_strings::invalid_value.data(),
+				L"--minimum-ttl must not exceed --max-hops");
+		}
+	}
+	catch (...) {
+		ReportError(WinMTRBranding::cli_strings::generic_error.data());
 	}
 }

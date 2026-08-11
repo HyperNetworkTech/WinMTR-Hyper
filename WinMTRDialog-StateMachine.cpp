@@ -43,6 +43,7 @@ void WinMTRDialog::Transit(STATES newState)
 	case STATES::TRACING: {
 		state = STATES::TRACING;
 		firstDataResize = true;
+		userSizedWindow = false;
 		buttonStart.SetWindowTextW(localized(IDS_STRING_STOP));
 		buttonStart.EnableWindow(TRUE);
 		buttonStart.SetFocus();

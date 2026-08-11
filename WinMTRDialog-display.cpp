@@ -824,7 +824,11 @@ CSize WinMTRDialog::minimumWindowSize()
 			RECT headerRect{};
 			if (::GetWindowRect(header, &headerRect)) headerHeight = headerRect.bottom - headerRect.top;
 		}
-		const int requiredListWidth = columnsWidth + listFrameWidth;
+		// Reserve the vertical-scrollbar gutter. Otherwise a later row can make
+		// the vertical bar steal client width and needlessly trigger a horizontal
+		// scrollbar even though the monitor still has unused space.
+		const int requiredListWidth = columnsWidth + listFrameWidth
+			+ GetSystemMetrics(SM_CXVSCROLL);
 		const int maximumListWidth = std::max(1, workWidth - frameWidth - margin * 2);
 		if (requiredListWidth > maximumListWidth) {
 			listFrameHeight += GetSystemMetrics(SM_CYHSCROLL);
@@ -860,6 +864,7 @@ void WinMTRDialog::resizeWindowToContent()
 
 void WinMTRDialog::OnSizing(UINT side, LPRECT rect)
 {
+	userSizedWindow = true;
 	CDialog::OnSizing(side, rect);
 	const CSize minimum = minimumWindowSize();
 	if (rect->right - rect->left < minimum.cx) {
@@ -1006,6 +1011,99 @@ void WinMTRDialog::SetUseDNS(bool value, options_source source) noexcept
 	hasResolveNamesFromCommandLine = source == options_source::cmd_line;
 }
 
+void WinMTRDialog::SetMaxHops(unsigned value, options_source source) noexcept
+{
+	maxHops = value;
+	hasMaxHopsFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetTimeoutMs(unsigned value, options_source source) noexcept
+{
+	timeoutMs = value;
+	hasTimeoutFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetCycles(unsigned value, options_source source) noexcept
+{
+	cycles = value;
+	hasCyclesFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetTos(unsigned value, options_source source) noexcept
+{
+	tos = value;
+	hasTosFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetPayloadPattern(int value, options_source source) noexcept
+{
+	payloadPattern = value;
+	hasPayloadPatternFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetStartTtl(unsigned value, options_source source) noexcept
+{
+	startTtl = value;
+	hasStartTtlFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetMinimumTtl(unsigned value, options_source source) noexcept
+{
+	minimumTtl = value;
+	hasMinimumTtlFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetUnknownHostLimit(unsigned value, options_source source) noexcept
+{
+	unknownHostLimit = value;
+	hasUnknownHostLimitFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetEcmpDisplayLimit(unsigned value, options_source source) noexcept
+{
+	ecmpDisplayLimit = value;
+	hasEcmpDisplayLimitFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetReplyCacheSeconds(unsigned value, options_source source) noexcept
+{
+	replyCacheSeconds = value;
+	hasReplyCacheFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetLookupAsnIsp(bool value, options_source source) noexcept
+{
+	lookupAsnIsp = value;
+	hasLookupAsnIspFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetDontFragment(bool value, options_source source) noexcept
+{
+	dontFragment = value;
+	hasDontFragmentFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetAddressFamilies(bool ipv4, bool ipv6, options_source source) noexcept
+{
+	useIPv4 = ipv4;
+	useIPv6 = ipv6;
+	hasAddressFamiliesFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetQueryPublicInfo(bool value, options_source source) noexcept
+{
+	queryPublicInfo = value;
+	hasQueryPublicInfoFromCommandLine = source == options_source::cmd_line;
+}
+
+void WinMTRDialog::SetPublicInfoRefresh(unsigned mode, unsigned minutes,
+	options_source source) noexcept
+{
+	publicInfoRefreshMode = mode;
+	publicInfoRefreshMinutes = minutes;
+	hasPublicInfoRefreshFromCommandLine = source == options_source::cmd_line;
+}
+
 void WinMTRDialog::OnCancel()
 {
 	OnClose();
@@ -1077,24 +1175,21 @@ int WinMTRDialog::DisplayRedraw()
 
 	for (size_t index = 0; index < snapshot.hops.size();) {
 		const auto& hop = snapshot.hops[index];
-		if (hop.completed == 0 && hop.in_flight != 0 && hop.responders.empty()) {
-			const int row = appendRow(L"等待回覆中…",
-				{ DisplayRowKind::primary, hop.hop, hop.hop, 0 });
-			setCell(row, 1, std::to_wstring(hop.hop));
-			setStatistics(row, hop);
-			++index;
-			continue;
-		}
 		if (hop.returned == 0 && hop.responders.empty()) {
 			size_t end = index;
+			bool anyCompleted = hop.completed != 0;
 			while (end + 1 < snapshot.hops.size()
 				&& snapshot.hops[end + 1].returned == 0
-				&& snapshot.hops[end + 1].in_flight == 0
-				&& snapshot.hops[end + 1].responders.empty()) ++end;
+				&& snapshot.hops[end + 1].responders.empty()) {
+				++end;
+				anyCompleted = anyCompleted || snapshot.hops[end].completed != 0;
+			}
 			const unsigned firstHop = hop.hop;
 			const unsigned lastHop = snapshot.hops[end].hop;
-			const CString noResponse = loadString(IDS_STRING_NO_RESPONSE_FROM_HOST);
-			const int row = appendRow(noResponse.GetString(),
+			const std::wstring label = snapshot.tracing && !anyCompleted
+				? L"等待回覆中…"
+				: std::wstring(loadString(IDS_STRING_NO_RESPONSE_FROM_HOST).GetString());
+			const int row = appendRow(label,
 				{ DisplayRowKind::unknown_range, firstHop, lastHop, 0 });
 			setCell(row, 1, firstHop == lastHop ? std::to_wstring(firstHop)
 				: std::format(L"{}-{}", firstHop, lastHop));
@@ -1203,11 +1298,16 @@ void WinMTRDialog::adjustWindowForRows()
 	const int maximumHeight = monitor.rcWork.bottom - monitor.rcWork.top;
 	const int requiredWidth = static_cast<int>(required.cx);
 	const int requiredHeight = static_cast<int>(required.cy);
-	const int desiredWidth = firstDataResize
-		? std::min(maximumWidth, requiredWidth)
+	const bool mayGrowAutomatically = firstDataResize || !userSizedWindow;
+	const int desiredWidth = mayGrowAutomatically
+		? std::min(maximumWidth, firstDataResize
+			? requiredWidth
+			: std::max(static_cast<int>(currentWindow.Width()), requiredWidth))
 		: static_cast<int>(currentWindow.Width());
-	const int desiredHeight = firstDataResize
-		? std::min(maximumHeight, requiredHeight)
+	const int desiredHeight = mayGrowAutomatically
+		? std::min(maximumHeight, firstDataResize
+			? requiredHeight
+			: std::max(static_cast<int>(currentWindow.Height()), requiredHeight))
 		: static_cast<int>(currentWindow.Height());
 	const int desiredLeft = std::clamp(static_cast<int>(currentWindow.left), static_cast<int>(monitor.rcWork.left),
 		static_cast<int>(monitor.rcWork.right) - desiredWidth);
@@ -1221,7 +1321,8 @@ void WinMTRDialog::adjustWindowForRows()
 	lastAutoRowCount = displayRows.size();
 	CRect client;
 	GetClientRect(client);
-	const int remaining = client.Width() - margin * 2 - columnsWidth;
+	const int listChrome = GetSystemMetrics(SM_CXEDGE) * 2 + GetSystemMetrics(SM_CXVSCROLL);
+	const int remaining = client.Width() - margin * 2 - listChrome - columnsWidth;
 	if (remaining > 0) listMtr.SetColumnWidth(13, listMtr.GetColumnWidth(13) + remaining);
 }
 

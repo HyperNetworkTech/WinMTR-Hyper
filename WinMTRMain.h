@@ -47,11 +47,12 @@ public:
 	WinMTRMain();
 
 	virtual BOOL InitInstance() override final;
+	virtual int ExitInstance() override final;
 
 	DECLARE_MESSAGE_MAP()
 
 private:
-
+	int requestedExitCode = 0;
 };
 
 #endif // ifndef WINMTRMAIN_H_

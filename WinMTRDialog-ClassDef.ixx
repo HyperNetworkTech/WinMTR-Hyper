@@ -53,6 +53,23 @@ public:
 	void SetPingSize(unsigned value, options_source source = options_source::none) noexcept;
 	void SetMaxLRU(int value, options_source source = options_source::none) noexcept;
 	void SetUseDNS(bool value, options_source source = options_source::none) noexcept;
+	void SetMaxHops(unsigned value, options_source source = options_source::none) noexcept;
+	void SetTimeoutMs(unsigned value, options_source source = options_source::none) noexcept;
+	void SetCycles(unsigned value, options_source source = options_source::none) noexcept;
+	void SetTos(unsigned value, options_source source = options_source::none) noexcept;
+	void SetPayloadPattern(int value, options_source source = options_source::none) noexcept;
+	void SetStartTtl(unsigned value, options_source source = options_source::none) noexcept;
+	void SetMinimumTtl(unsigned value, options_source source = options_source::none) noexcept;
+	void SetUnknownHostLimit(unsigned value, options_source source = options_source::none) noexcept;
+	void SetEcmpDisplayLimit(unsigned value, options_source source = options_source::none) noexcept;
+	void SetReplyCacheSeconds(unsigned value, options_source source = options_source::none) noexcept;
+	void SetLookupAsnIsp(bool value, options_source source = options_source::none) noexcept;
+	void SetDontFragment(bool value, options_source source = options_source::none) noexcept;
+	void SetAddressFamilies(bool ipv4, bool ipv6,
+		options_source source = options_source::none) noexcept;
+	void SetQueryPublicInfo(bool value, options_source source = options_source::none) noexcept;
+	void SetPublicInfoRefresh(unsigned mode, unsigned minutes,
+		options_source source = options_source::none) noexcept;
 
 	[[nodiscard]] double getInterval() const noexcept override { return interval.load(); }
 	[[nodiscard]] unsigned getPingSize() const noexcept override { return packetSize.load(); }
@@ -124,6 +141,7 @@ private:
 	int naturalColumnsWidth = 0;
 	std::array<int, 14> automaticColumnWidths{};
 	bool userSizedColumns = false;
+	bool userSizedWindow = false;
 	bool publicInfoAutoSized = false;
 	int topContentBottom = 0;
 
@@ -168,6 +186,21 @@ private:
 	bool hasHistoryLimitFromCommandLine = false;
 	bool hasIntervalFromCommandLine = false;
 	bool hasResolveNamesFromCommandLine = false;
+	bool hasMaxHopsFromCommandLine = false;
+	bool hasTimeoutFromCommandLine = false;
+	bool hasCyclesFromCommandLine = false;
+	bool hasTosFromCommandLine = false;
+	bool hasPayloadPatternFromCommandLine = false;
+	bool hasStartTtlFromCommandLine = false;
+	bool hasMinimumTtlFromCommandLine = false;
+	bool hasUnknownHostLimitFromCommandLine = false;
+	bool hasEcmpDisplayLimitFromCommandLine = false;
+	bool hasReplyCacheFromCommandLine = false;
+	bool hasLookupAsnIspFromCommandLine = false;
+	bool hasDontFragmentFromCommandLine = false;
+	bool hasAddressFamiliesFromCommandLine = false;
+	bool hasQueryPublicInfoFromCommandLine = false;
+	bool hasPublicInfoRefreshFromCommandLine = false;
 
 	std::mutex networkInfoMutex;
 	winmtr::network_data::CurrentNetworkInfo networkInfo;

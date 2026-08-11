@@ -124,44 +124,50 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 	if (!hasIntervalFromCommandLine) interval = std::clamp<double>(queryDword(config, L"IntervalMs",
 		static_cast<DWORD>(WinMTRUtils::DEFAULT_INTERVAL * 1000.0)) / 1000.0,
 		WinMTRUtils::MIN_INTERVAL, WinMTRUtils::MAX_INTERVAL);
-	maxHops = std::clamp<unsigned>(queryDword(config, L"MaxHops", WinMTRUtils::DEFAULT_MAX_HOPS),
-		WinMTRUtils::MIN_MAX_HOPS, WinMTRUtils::MAX_MAX_HOPS);
-	timeoutMs = std::clamp<unsigned>(queryDword(config, L"TimeoutMs", WinMTRUtils::DEFAULT_TIMEOUT_MS),
-		WinMTRUtils::MIN_TIMEOUT_MS, WinMTRUtils::MAX_TIMEOUT_MS);
-	cycles = std::clamp<unsigned>(queryDword(config, L"Cycles", WinMTRUtils::DEFAULT_CYCLES),
-		WinMTRUtils::MIN_CYCLES, WinMTRUtils::MAX_CYCLES);
-	tos = std::clamp<unsigned>(queryDword(config, L"TOS", WinMTRUtils::DEFAULT_TOS),
-		WinMTRUtils::MIN_TOS, WinMTRUtils::MAX_TOS);
-	payloadPattern = std::clamp(static_cast<int>(queryDword(config, L"PayloadPattern",
-		static_cast<DWORD>(WinMTRUtils::DEFAULT_PAYLOAD_PATTERN))), WinMTRUtils::MIN_PAYLOAD_PATTERN,
-		WinMTRUtils::MAX_PAYLOAD_PATTERN);
-	startTtl = std::clamp<unsigned>(queryDword(config, L"StartTTL", WinMTRUtils::DEFAULT_START_TTL),
-		WinMTRUtils::MIN_START_TTL, maxHops.load());
-	minimumTtl = std::clamp<unsigned>(queryDword(config, L"MinimumTTL", WinMTRUtils::DEFAULT_MINIMUM_TTL),
-		WinMTRUtils::MIN_MINIMUM_TTL, maxHops.load());
-	unknownHostLimit = std::clamp<unsigned>(queryDword(config, L"UnknownHostLimit",
-		WinMTRUtils::DEFAULT_UNKNOWN_HOST_LIMIT), WinMTRUtils::MIN_UNKNOWN_HOST_LIMIT,
-		WinMTRUtils::MAX_UNKNOWN_HOST_LIMIT);
-	ecmpDisplayLimit = std::clamp<unsigned>(queryDword(config, L"EcmpDisplayLimit",
-		WinMTRUtils::DEFAULT_ECMP_DISPLAY_LIMIT), WinMTRUtils::MIN_ECMP_DISPLAY_LIMIT,
-		WinMTRUtils::MAX_ECMP_RESPONDERS);
-	replyCacheSeconds = std::clamp<unsigned>(queryDword(config, L"ReplyCacheSeconds",
-		WinMTRUtils::DEFAULT_REPLY_CACHE_SECONDS), WinMTRUtils::MIN_REPLY_CACHE_SECONDS,
-		WinMTRUtils::MAX_REPLY_CACHE_SECONDS);
-	lookupAsnIsp = queryDword(config, L"LookupAsnIsp", WinMTRUtils::DEFAULT_LOOKUP_ASN_ISP) != 0;
-	dontFragment = queryDword(config, L"DontFragment", WinMTRUtils::DEFAULT_DONT_FRAGMENT) != 0;
-	useIPv4 = queryDword(config, L"UseIPv4", WinMTRUtils::DEFAULT_USE_IPV4) != 0;
-	useIPv6 = queryDword(config, L"UseIPv6", WinMTRUtils::DEFAULT_USE_IPV6) != 0;
-	queryPublicInfo = queryDword(config, L"QueryPublicInfo",
+	if (!hasMaxHopsFromCommandLine) maxHops = std::clamp<unsigned>(queryDword(config, L"MaxHops",
+		WinMTRUtils::DEFAULT_MAX_HOPS), WinMTRUtils::MIN_MAX_HOPS, WinMTRUtils::MAX_MAX_HOPS);
+	if (!hasTimeoutFromCommandLine) timeoutMs = std::clamp<unsigned>(queryDword(config, L"TimeoutMs",
+		WinMTRUtils::DEFAULT_TIMEOUT_MS), WinMTRUtils::MIN_TIMEOUT_MS, WinMTRUtils::MAX_TIMEOUT_MS);
+	if (!hasCyclesFromCommandLine) cycles = std::clamp<unsigned>(queryDword(config, L"Cycles",
+		WinMTRUtils::DEFAULT_CYCLES), WinMTRUtils::MIN_CYCLES, WinMTRUtils::MAX_CYCLES);
+	if (!hasTosFromCommandLine) tos = std::clamp<unsigned>(queryDword(config, L"TOS",
+		WinMTRUtils::DEFAULT_TOS), WinMTRUtils::MIN_TOS, WinMTRUtils::MAX_TOS);
+	if (!hasPayloadPatternFromCommandLine) payloadPattern = std::clamp(static_cast<int>(queryDword(config,
+		L"PayloadPattern", static_cast<DWORD>(WinMTRUtils::DEFAULT_PAYLOAD_PATTERN))),
+		WinMTRUtils::MIN_PAYLOAD_PATTERN, WinMTRUtils::MAX_PAYLOAD_PATTERN);
+	if (!hasStartTtlFromCommandLine) startTtl = std::clamp<unsigned>(queryDword(config, L"StartTTL",
+		WinMTRUtils::DEFAULT_START_TTL), WinMTRUtils::MIN_START_TTL, maxHops.load());
+	if (!hasMinimumTtlFromCommandLine) minimumTtl = std::clamp<unsigned>(queryDword(config, L"MinimumTTL",
+		WinMTRUtils::DEFAULT_MINIMUM_TTL), WinMTRUtils::MIN_MINIMUM_TTL, maxHops.load());
+	if (!hasUnknownHostLimitFromCommandLine) unknownHostLimit = std::clamp<unsigned>(queryDword(config,
+		L"UnknownHostLimit", WinMTRUtils::DEFAULT_UNKNOWN_HOST_LIMIT),
+		WinMTRUtils::MIN_UNKNOWN_HOST_LIMIT, WinMTRUtils::MAX_UNKNOWN_HOST_LIMIT);
+	if (!hasEcmpDisplayLimitFromCommandLine) ecmpDisplayLimit = std::clamp<unsigned>(queryDword(config,
+		L"EcmpDisplayLimit", WinMTRUtils::DEFAULT_ECMP_DISPLAY_LIMIT),
+		WinMTRUtils::MIN_ECMP_DISPLAY_LIMIT, WinMTRUtils::MAX_ECMP_RESPONDERS);
+	if (!hasReplyCacheFromCommandLine) replyCacheSeconds = std::clamp<unsigned>(queryDword(config,
+		L"ReplyCacheSeconds", WinMTRUtils::DEFAULT_REPLY_CACHE_SECONDS),
+		WinMTRUtils::MIN_REPLY_CACHE_SECONDS, WinMTRUtils::MAX_REPLY_CACHE_SECONDS);
+	if (!hasLookupAsnIspFromCommandLine) lookupAsnIsp = queryDword(config, L"LookupAsnIsp",
+		WinMTRUtils::DEFAULT_LOOKUP_ASN_ISP) != 0;
+	if (!hasDontFragmentFromCommandLine) dontFragment = queryDword(config, L"DontFragment",
+		WinMTRUtils::DEFAULT_DONT_FRAGMENT) != 0;
+	if (!hasAddressFamiliesFromCommandLine) {
+		useIPv4 = queryDword(config, L"UseIPv4", WinMTRUtils::DEFAULT_USE_IPV4) != 0;
+		useIPv6 = queryDword(config, L"UseIPv6", WinMTRUtils::DEFAULT_USE_IPV6) != 0;
+	}
+	if (!hasQueryPublicInfoFromCommandLine) queryPublicInfo = queryDword(config, L"QueryPublicInfo",
 		WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO) != 0;
-	publicInfoRefreshMode = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMode",
-		WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE),
-		WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE,
-		WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL);
-	publicInfoRefreshMinutes = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMinutes",
-		WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MINUTES),
-		WinMTRUtils::MIN_PUBLIC_INFO_REFRESH_MINUTES,
-		WinMTRUtils::MAX_PUBLIC_INFO_REFRESH_MINUTES);
+	if (!hasPublicInfoRefreshFromCommandLine) {
+		publicInfoRefreshMode = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMode",
+			WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE),
+			WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE,
+			WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL);
+		publicInfoRefreshMinutes = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMinutes",
+			WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MINUTES),
+			WinMTRUtils::MIN_PUBLIC_INFO_REFRESH_MINUTES,
+			WinMTRUtils::MAX_PUBLIC_INFO_REFRESH_MINUTES);
+	}
 
 	auto persistedHosts = loadPersistedHistory();
 	if (!hasHistoryLimitFromCommandLine) {

@@ -114,6 +114,11 @@ BOOL WinMTRMain::InitInstance()
 	WinMTRDialog mtrDialog;
 	utils::CWinMTRCommandLineParser cmd_info(mtrDialog);
 	ParseCommandLine(cmd_info);
+	cmd_info.Validate();
+	if (cmd_info.hasError()) {
+		requestedExitCode = 2;
+		return FALSE;
+	}
 	if (cmd_info.isAskingForHelp()) {
 		WinMTRHelp mtrHelp;
 		m_pMainWnd = &mtrHelp;
@@ -128,5 +133,11 @@ BOOL WinMTRMain::InitInstance()
 	
 
 	return FALSE;
+}
+
+int WinMTRMain::ExitInstance()
+{
+	CWinApp::ExitInstance();
+	return requestedExitCode;
 }
 
