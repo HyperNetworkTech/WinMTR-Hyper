@@ -28,8 +28,13 @@ enum class EcsSupport {
 
 struct DnsConnectionInfo final {
 	std::wstring publicAddress;
+	std::wstring hostname;
+	std::wstring city;
+	std::wstring region;
+	std::wstring country;
+	std::wstring countryCode;
+	std::wstring asn;
 	std::wstring provider;
-	std::wstring location;
 	std::wstring ecsSubnet;
 	EcsSupport ecsSupport = EcsSupport::unknown;
 	std::vector<std::wstring> localServers;

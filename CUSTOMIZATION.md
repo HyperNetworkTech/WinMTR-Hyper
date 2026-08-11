@@ -38,9 +38,13 @@
 | IPv4 主要來源 | `IPINFO_IPV4_*` | `ipinfo.io` 連線資訊 |
 | IPv6 主要來源 | `IPINFO_IPV6_*` | `v6.ipinfo.io` 連線資訊 |
 | DNS／ECS | `AKAHELP_*` | `whoami.ds.akahelp.net` DNS 查詢 |
-| IPv4／IPv6 公網 IP 備援 | `IPIFY_IPV4_*`、`IPIFY_IPV6_*` | `api4.ipify.org`、`api6.ipify.org` |
-| 地區與業者備援 | `IPAPI_*` | `ipapi.co` |
-| ASN／ISP 備援 | `TEAM_CYMRU_*` | Team Cymru IPv4、IPv6、ASN DNS 後綴與說明網址 |
+| 完整連線資訊備援 | `IPAPI_*` | `ipapi.co`；主要來源完全不可用時才查詢 |
+| IPv4／IPv6 位址最終備援 | `IPIFY_IPV4_*`、`IPIFY_IPV6_*` | `api4.ipify.org`、`api6.ipify.org` |
+| 指定位址 ASN／ISP 最終備援 | `TEAM_CYMRU_*` | Team Cymru IPv4、IPv6、ASN DNS 後綴與說明網址 |
+
+同一個 IPv4、IPv6 或遞迴 DNS 中繼資料結果只採用一個可用來源，不以
+其他服務補齊缺少欄位；只有目前來源完全無法產生可用結果時才依序查詢
+備援。Windows 網路設定仍可用來列出本機 DNS 伺服器，但不列入「資料來源」。
 
 新增或替換來源時，除了更新常數，也要同步檢查：
 

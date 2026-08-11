@@ -173,6 +173,7 @@ private:
 	void configureList();
 	void applyTechnicalFonts(UINT dpi);
 	void adjustWindowForRows();
+	void resizeWindowToContent();
 	[[nodiscard]] CSize minimumWindowSize();
 	void layoutControls(int clientWidth, int clientHeight);
 	void showNodeDetails(const DisplayRow& row);

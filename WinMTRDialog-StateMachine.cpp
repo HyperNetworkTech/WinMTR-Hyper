@@ -22,6 +22,15 @@ namespace {
 	value.LoadStringW(id);
 	return value;
 }
+
+void hideComboEditSelection(CComboBox& combo, bool hide)
+{
+	COMBOBOXINFO info{ .cbSize = sizeof(COMBOBOXINFO) };
+	if (!GetComboBoxInfo(combo.GetSafeHwnd(), &info) || info.hwndItem == nullptr) return;
+	SendMessageW(info.hwndItem, EM_SETSEL, 0, 0);
+	SendMessageW(info.hwndItem, EM_HIDESELECTION, hide ? TRUE : FALSE, FALSE);
+	RedrawWindow(info.hwndItem, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+}
 }
 
 void WinMTRDialog::Transit(STATES newState)
@@ -38,6 +47,7 @@ void WinMTRDialog::Transit(STATES newState)
 		buttonStart.SetFocus();
 		comboHost.SetEditSel(0, 0);
 		comboHost.EnableWindow(FALSE);
+		hideComboEditSelection(comboHost, true);
 		buttonOptions.EnableWindow(FALSE);
 		tracing.store(true, std::memory_order_release);
 		const auto generation = ++traceGeneration;
@@ -67,6 +77,7 @@ void WinMTRDialog::Transit(STATES newState)
 		buttonStart.SetWindowTextW(localized(IDS_STRING_START));
 		buttonStart.EnableWindow(TRUE);
 		comboHost.EnableWindow(TRUE);
+		hideComboEditSelection(comboHost, false);
 		comboHost.SetEditSel(0, 0);
 		buttonOptions.EnableWindow(TRUE);
 		setStatus(localized(IDS_STATUS_READY));

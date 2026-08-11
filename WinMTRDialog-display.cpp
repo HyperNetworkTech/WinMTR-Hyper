@@ -90,7 +90,14 @@ void createTechnicalFont(CFont& font, UINT dpi, int pointTenths)
 void moveControl(CWnd* parent, int id, int x, int y, int width, int height)
 {
 	if (auto control = parent->GetDlgItem(id); control != nullptr && ::IsWindow(control->GetSafeHwnd())) {
-		control->SetWindowPos(nullptr, x, y, std::max(width, 1), std::max(height, 1),
+		const int targetWidth = std::max(width, 1);
+		const int targetHeight = std::max(height, 1);
+		CRect current;
+		control->GetWindowRect(current);
+		parent->ScreenToClient(current);
+		if (current.left == x && current.top == y
+			&& current.Width() == targetWidth && current.Height() == targetHeight) return;
+		control->SetWindowPos(nullptr, x, y, targetWidth, targetHeight,
 			SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW);
 	}
 }
@@ -107,6 +114,33 @@ void moveControl(CWnd* parent, int id, int x, int y, int width, int height)
 	const int width = dc.GetTextExtent(text).cx;
 	if (previous != nullptr) dc.SelectObject(previous);
 	return width;
+}
+
+[[nodiscard]] int naturalPublicInformationWidth(CWnd* parent)
+{
+	const HWND window = parent->GetSafeHwnd();
+	const int gap = scaled(window, 8);
+	const int padding = scaled(window, 12);
+	const std::array<int, 4> row1Labels{
+		scaled(window, 30), scaled(window, 52), scaled(window, 52), scaled(window, 46)
+	};
+	const std::array<int, 4> row1Ids{
+		IDC_STATIC_PUBLIC_IP, IDC_STATIC_PUBLIC_COUNTRY,
+		IDC_STATIC_PUBLIC_CITY, IDC_STATIC_PUBLIC_ASN
+	};
+	const std::array<int, 4> row1MinimumValues{
+		scaled(window, 40), scaled(window, 20), scaled(window, 30), scaled(window, 30)
+	};
+	int row1 = gap * 3;
+	for (size_t index = 0; index < row1Ids.size(); ++index) {
+		row1 += row1Labels[index] + std::max(row1MinimumValues[index],
+			controlTextWidth(parent, row1Ids[index]) + padding);
+	}
+	const int row2 = scaled(window, 84) + std::max(scaled(window, 40),
+		controlTextWidth(parent, IDC_STATIC_PUBLIC_HOSTNAME) + padding)
+		+ gap + scaled(window, 42) + std::max(scaled(window, 60),
+			controlTextWidth(parent, IDC_STATIC_PUBLIC_ISP) + padding);
+	return std::max(row1, row2);
 }
 
 [[nodiscard]] CString loadString(UINT id)
@@ -177,13 +211,18 @@ protected:
 		{
 			CClientDC dc(&edit);
 			CFont* previousFont = dc.SelectObject(&technicalFont);
+			const int tabPixels = scaled(GetSafeHwnd(), 180);
 			std::wstring_view remaining = contents;
 			while (!remaining.empty()) {
 				const auto newline = remaining.find(L'\n');
 				auto line = remaining.substr(0, newline);
 				if (!line.empty() && line.back() == L'\r') line.remove_suffix(1);
-				maximumLineWidth = std::max(maximumLineWidth,
-					static_cast<int>(dc.GetTextExtent(line.data(), static_cast<int>(line.size())).cx));
+				const auto tab = line.find(L'\t');
+				const int lineWidth = tab == std::wstring_view::npos
+					? static_cast<int>(dc.GetTextExtent(line.data(), static_cast<int>(line.size())).cx)
+					: tabPixels + static_cast<int>(dc.GetTextExtent(line.data() + tab + 1,
+						static_cast<int>(line.size() - tab - 1)).cx);
+				maximumLineWidth = std::max(maximumLineWidth, lineWidth);
 				if (newline == std::wstring_view::npos) break;
 				remaining.remove_prefix(newline + 1);
 			}
@@ -206,7 +245,10 @@ protected:
 		GetClientRect(client);
 		initialized = true;
 		layout(client.Width(), client.Height());
-		return TRUE;
+		edit.SetSel(0, 0);
+		edit.HideSelection(TRUE, FALSE);
+		if (CWnd* close = GetDlgItem(IDCANCEL); close != nullptr) close->SetFocus();
+		return FALSE;
 	}
 
 	afx_msg void OnSize(UINT type, int width, int height)
@@ -228,29 +270,49 @@ protected:
 
 	void ApplyMixedFonts()
 	{
-		const auto applyFont = [this](int first, int last, std::wstring_view face) {
-			CHARFORMAT format{};
+		CString displayed;
+		edit.GetWindowTextW(displayed);
+		const auto applyFormat = [this](int first, int last, std::wstring_view face,
+			bool bold, std::optional<COLORREF> colour = std::nullopt) {
+			CHARFORMAT2 format{};
 			format.cbSize = sizeof(format);
-			format.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET;
-			format.yHeight = 180; // 9 points in twips
+			format.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET | CFM_BOLD;
+			format.dwEffects = bold ? CFE_BOLD : 0;
+			format.yHeight = 180;
 			format.bCharSet = DEFAULT_CHARSET;
+			if (colour) {
+				format.dwMask |= CFM_COLOR;
+				format.crTextColor = *colour;
+			}
 			wcsncpy_s(format.szFaceName, face.data(), _TRUNCATE);
 			edit.SetSel(first, last);
 			edit.SetSelectionCharFormat(format);
 		};
 
-		CString displayed;
-		edit.GetWindowTextW(displayed);
-		applyFont(0, displayed.GetLength(), WinMTRBranding::ui_font);
-		for (int index = 0; index < displayed.GetLength();) {
-			if (displayed[index] < 0x20 || displayed[index] > 0x7e) {
-				++index;
-				continue;
+		applyFormat(0, displayed.GetLength(), WinMTRBranding::ui_font, false);
+		PARAFORMAT2 paragraph{};
+		paragraph.cbSize = sizeof(paragraph);
+		paragraph.dwMask = PFM_TABSTOPS;
+		paragraph.cTabCount = 1;
+		paragraph.rgxTabs[0] = 2700; // 1.875 inches: clears the longest Chinese label.
+		edit.SetSel(0, displayed.GetLength());
+		edit.SendMessageW(EM_SETPARAFORMAT, SCF_SELECTION,
+			reinterpret_cast<LPARAM>(&paragraph));
+
+		for (int lineStart = 0; lineStart < displayed.GetLength();) {
+			int lineEnd = displayed.Find(L'\n', lineStart);
+			if (lineEnd < 0) lineEnd = displayed.GetLength();
+			int contentEnd = lineEnd;
+			if (contentEnd > lineStart && displayed[contentEnd - 1] == L'\r') --contentEnd;
+			const int tab = displayed.Find(L'\t', lineStart);
+			if (tab >= lineStart && tab < contentEnd) {
+				applyFormat(tab + 1, contentEnd, WinMTRBranding::table_font, false,
+					RGB(32, 72, 112));
 			}
-			const int first = index++;
-			while (index < displayed.GetLength() &&
-				displayed[index] >= 0x20 && displayed[index] <= 0x7e) ++index;
-			applyFont(first, index, WinMTRBranding::table_font);
+			else if (contentEnd > lineStart) {
+				applyFormat(lineStart, contentEnd, WinMTRBranding::ui_font, true);
+			}
+			lineStart = lineEnd + 1;
 		}
 		edit.SetSel(0, 0);
 		edit.SetModify(FALSE);
@@ -429,19 +491,6 @@ BOOL WinMTRDialog::OnInitDialog()
 	groupPublicInfo.GetWindowRect(publicRect);
 	ScreenToClient(publicRect);
 	topContentBottom = publicRect.bottom;
-	CRect listRect;
-	listMtr.GetWindowRect(listRect);
-	CRect windowRect;
-	GetWindowRect(windowRect);
-	MONITORINFO initialMonitor{ .cbSize = sizeof(MONITORINFO) };
-	GetMonitorInfoW(MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST), &initialMonitor);
-	const int availableWidth = initialMonitor.rcWork.right - initialMonitor.rcWork.left;
-	const int compactWidth = std::min(availableWidth, scaled(GetSafeHwnd(), 830));
-	const int compactHeight = scaled(GetSafeHwnd(), compactWidth < scaled(GetSafeHwnd(), 830) ? 280 : 220);
-	const int reducedHeight = std::max(compactHeight,
-		windowRect.Height() - listRect.Height() + scaled(GetSafeHwnd(), 12));
-	SetWindowPos(nullptr, 0, 0, compactWidth, reducedHeight,
-		SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 
 	if (queryPublicInfo.load()) startNetworkInfoQuery();
 	else {
@@ -451,6 +500,10 @@ BOOL WinMTRDialog::OnInitDialog()
 			SetDlgItemTextW(id, loadString(IDS_VALUE_UNAVAILABLE));
 		}
 	}
+	CRect initialClient;
+	GetClientRect(initialClient);
+	layoutControls(initialClient.Width(), initialClient.Height());
+	resizeWindowToContent();
 
 	if (autoStart) {
 		comboHost.SetWindowTextW(defaultHostname.c_str());
@@ -483,6 +536,7 @@ void WinMTRDialog::applyTechnicalFonts(UINT dpi)
 	listMtr.SetFont(&tableFont);
 	comboHost.SetFont(&technicalFont);
 	for (const int id : { IDC_STATIC_PUBLIC_IP, IDC_STATIC_PUBLIC_HOSTNAME,
+		IDC_STATIC_PUBLIC_COUNTRY, IDC_STATIC_PUBLIC_CITY,
 		IDC_STATIC_PUBLIC_ASN, IDC_STATIC_PUBLIC_ISP }) {
 		if (CWnd* control = GetDlgItem(id); control != nullptr) control->SetFont(&technicalFont);
 	}
@@ -559,8 +613,8 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 	const int textHeight = scaled(GetSafeHwnd(), 18);
 	const int firstX = margin + gap;
 
-	// Public information uses four compact fields on the first row and two on
-	// the second. Each field is content-sized; only long values are capped.
+	// Public information uses four fields on the first row and two on the
+	// second. Natural text widths are preserved unless the screen leaves no room.
 	const std::array<int, 4> row1Labels{
 		scaled(GetSafeHwnd(), 30), scaled(GetSafeHwnd(), 52),
 		scaled(GetSafeHwnd(), 52), scaled(GetSafeHwnd(), 46)
@@ -570,59 +624,68 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 		IDC_STATIC_PUBLIC_CITY, IDC_STATIC_PUBLIC_ASN
 	};
 	const std::array<int, 4> row1MinimumValues{
-		scaled(GetSafeHwnd(), 48), scaled(GetSafeHwnd(), 36),
-		scaled(GetSafeHwnd(), 42), scaled(GetSafeHwnd(), 48)
-	};
-	const std::array<int, 4> row1MaximumValues{
-		scaled(GetSafeHwnd(), 210), scaled(GetSafeHwnd(), 140),
-		scaled(GetSafeHwnd(), 180), scaled(GetSafeHwnd(), 120)
+		scaled(GetSafeHwnd(), 40), scaled(GetSafeHwnd(), 20),
+		scaled(GetSafeHwnd(), 30), scaled(GetSafeHwnd(), 30)
 	};
 	std::array<int, 4> row1Widths{};
 	std::array<int, 4> row1MinimumWidths{};
 	for (size_t index = 0; index < row1Widths.size(); ++index) {
 		row1MinimumWidths[index] = row1Labels[index] + row1MinimumValues[index];
-		row1Widths[index] = row1Labels[index] + std::clamp(
-			controlTextWidth(this, row1ValueIds[index]) + scaled(GetSafeHwnd(), 12),
-			row1MinimumValues[index], row1MaximumValues[index]);
+		row1Widths[index] = row1Labels[index] + std::max(row1MinimumValues[index],
+			controlTextWidth(this, row1ValueIds[index]) + scaled(GetSafeHwnd(), 12));
 	}
-	const int row1Budget = std::max(4, available - gap * 3);
-	const int desiredTotal = std::accumulate(row1Widths.begin(), row1Widths.end(), 0);
-	const int minimumTotal = std::accumulate(row1MinimumWidths.begin(), row1MinimumWidths.end(), 0);
-	if (desiredTotal > row1Budget && row1Budget > minimumTotal) {
-		const int extraBudget = row1Budget - minimumTotal;
+	const auto fitWidths = [](auto& widths, const auto& minimumWidths, int budget) {
+		const int desiredTotal = std::accumulate(widths.begin(), widths.end(), 0);
+		const int minimumTotal = std::accumulate(minimumWidths.begin(), minimumWidths.end(), 0);
+		if (desiredTotal <= budget || budget <= minimumTotal) return;
+		const int extraBudget = budget - minimumTotal;
 		const int extraWanted = desiredTotal - minimumTotal;
 		int assignedExtra = 0;
-		for (size_t index = 0; index < row1Widths.size(); ++index) {
-			const int wanted = row1Widths[index] - row1MinimumWidths[index];
-			const int extra = index + 1 == row1Widths.size()
+		for (size_t index = 0; index < widths.size(); ++index) {
+			const int wanted = widths[index] - minimumWidths[index];
+			const int extra = index + 1 == widths.size()
 				? extraBudget - assignedExtra
 				: MulDiv(extraBudget, wanted, extraWanted);
-			row1Widths[index] = row1MinimumWidths[index] + extra;
+			widths[index] = minimumWidths[index] + extra;
 			assignedExtra += extra;
 		}
+	};
+
+	const int hostnameLabelWidth = scaled(GetSafeHwnd(), 84);
+	const int ispLabelWidth = scaled(GetSafeHwnd(), 42);
+	std::array<int, 2> row2MinimumWidths{
+		hostnameLabelWidth + scaled(GetSafeHwnd(), 40),
+		ispLabelWidth + scaled(GetSafeHwnd(), 60)
+	};
+	std::array<int, 2> row2Widths{
+		hostnameLabelWidth + std::max(scaled(GetSafeHwnd(), 40),
+			controlTextWidth(this, IDC_STATIC_PUBLIC_HOSTNAME) + scaled(GetSafeHwnd(), 12)),
+		ispLabelWidth + std::max(scaled(GetSafeHwnd(), 60),
+			controlTextWidth(this, IDC_STATIC_PUBLIC_ISP) + scaled(GetSafeHwnd(), 12))
+	};
+	fitWidths(row2Widths, row2MinimumWidths, std::max(2, available - gap));
+	const int row2Hostname = row2Widths[0];
+	const int row2Isp = row2Widths[1];
+	const int row2Total = row2Hostname + gap + row2Isp;
+
+	fitWidths(row1Widths, row1MinimumWidths, std::max(4, available - gap * 3));
+	const int row1ContentWidth = std::accumulate(row1Widths.begin(), row1Widths.end(), 0);
+	const int row1GapTotal = std::min(std::max(0, available - row1ContentWidth),
+		std::max(gap * 3, row2Total - row1ContentWidth));
+	std::array<int, 3> row1Gaps{
+		row1GapTotal / 3, row1GapTotal / 3, row1GapTotal / 3
+	};
+	for (int remainder = row1GapTotal % 3, index = 0; remainder > 0; --remainder, ++index) {
+		++row1Gaps[static_cast<size_t>(index)];
 	}
 	const int row1Ip = row1Widths[0];
 	const int row1Country = row1Widths[1];
 	const int row1City = row1Widths[2];
 	const int row1Asn = row1Widths[3];
-	const int row1CountryX = firstX + row1Ip + gap;
-	const int row1CityX = row1CountryX + row1Country + gap;
-	const int row1AsnX = row1CityX + row1City + gap;
-
-	const int hostnameLabelWidth = scaled(GetSafeHwnd(), 84);
-	const int ispLabelWidth = scaled(GetSafeHwnd(), 42);
-	const int minimumIspWidth = ispLabelWidth + scaled(GetSafeHwnd(), 80);
-	const int hostnameMaximum = std::max(scaled(GetSafeHwnd(), 60),
-		available - gap - minimumIspWidth - hostnameLabelWidth);
-	const int hostnameValueWidth = std::clamp(
-		controlTextWidth(this, IDC_STATIC_PUBLIC_HOSTNAME) + scaled(GetSafeHwnd(), 12),
-		scaled(GetSafeHwnd(), 60), hostnameMaximum);
-	const int row2Hostname = hostnameLabelWidth + hostnameValueWidth;
+	const int row1CountryX = firstX + row1Ip + row1Gaps[0];
+	const int row1CityX = row1CountryX + row1Country + row1Gaps[1];
+	const int row1AsnX = row1CityX + row1City + row1Gaps[2];
 	const int row2IspX = firstX + row2Hostname + gap;
-	const int ispAvailable = std::max(1, available - row2Hostname - gap);
-	const int row2Isp = std::min(ispAvailable, ispLabelWidth + std::clamp(
-		controlTextWidth(this, IDC_STATIC_PUBLIC_ISP) + scaled(GetSafeHwnd(), 12),
-		scaled(GetSafeHwnd(), 80), scaled(GetSafeHwnd(), 260)));
 
 	moveControl(this, IDC_STATIC_PUBLIC_IP_LABEL, firstX, line1, scaled(GetSafeHwnd(), 28), textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_IP, firstX + scaled(GetSafeHwnd(), 30), line1,
@@ -662,6 +725,13 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 	}
 	if (::IsWindow(statusBar.GetSafeHwnd())) RepositionBars(AFX_IDW_CONTROLBAR_FIRST, AFX_IDW_CONTROLBAR_LAST, 0);
 	SetRedraw(TRUE);
+	if (!comboHost.IsWindowEnabled()) {
+		comboHost.SetEditSel(0, 0);
+		COMBOBOXINFO info{ .cbSize = sizeof(COMBOBOXINFO) };
+		if (GetComboBoxInfo(comboHost.GetSafeHwnd(), &info) && info.hwndItem != nullptr) {
+			::SendMessageW(info.hwndItem, EM_SETSEL, 0, 0);
+		}
+	}
 	RedrawWindow(nullptr, nullptr,
 		RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
 }
@@ -672,12 +742,29 @@ CSize WinMTRDialog::minimumWindowSize()
 	GetMonitorInfoW(MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST), &monitor);
 	const int workWidth = monitor.rcWork.right - monitor.rcWork.left;
 	const int workHeight = monitor.rcWork.bottom - monitor.rcWork.top;
-	const int compactWidth = scaled(GetSafeHwnd(), 830);
-	int desiredWidth = compactWidth;
-	int desiredHeight = scaled(GetSafeHwnd(), workWidth < compactWidth ? 280 : 220);
+	CRect windowRect;
+	CRect clientRect;
+	GetWindowRect(windowRect);
+	GetClientRect(clientRect);
+	const int frameWidth = windowRect.Width() - clientRect.Width();
+	const int frameHeight = windowRect.Height() - clientRect.Height();
+	const int margin = scaled(GetSafeHwnd(), 10);
+	const int gap = scaled(GetSafeHwnd(), 8);
+	const int detailWidth = scaled(GetSafeHwnd(), 110);
+	const int publicClientWidth = naturalPublicInformationWidth(this)
+		+ margin * 2 + gap * 3 + detailWidth;
+	int desiredWidth = std::max(scaled(GetSafeHwnd(), 830),
+		std::max(scaled(GetSafeHwnd(), 800), publicClientWidth) + frameWidth);
+	int statusHeight = scaled(GetSafeHwnd(), 25);
+	if (::IsWindow(statusBar.GetSafeHwnd())) {
+		CRect statusRect;
+		statusBar.GetWindowRect(statusRect);
+		statusHeight = statusRect.Height();
+	}
+	int desiredHeight = std::max(scaled(GetSafeHwnd(), 220),
+		topContentBottom + gap + statusHeight + frameHeight);
 
 	if (listIsVisible && !displayRows.empty()) {
-		const int margin = scaled(GetSafeHwnd(), 10);
 		const int columnsWidth = naturalColumnsWidth > 0
 			? naturalColumnsWidth
 			: scaled(GetSafeHwnd(), 830);
@@ -689,24 +776,31 @@ CSize WinMTRDialog::minimumWindowSize()
 			RECT headerRect{};
 			if (::GetWindowRect(header, &headerRect)) headerHeight = headerRect.bottom - headerRect.top;
 		}
-		int statusHeight = scaled(GetSafeHwnd(), 25);
-		if (::IsWindow(statusBar.GetSafeHwnd())) {
-			CRect statusRect;
-			statusBar.GetWindowRect(statusRect);
-			statusHeight = statusRect.Height();
-		}
-		CRect windowRect;
-		CRect clientRect;
-		GetWindowRect(windowRect);
-		GetClientRect(clientRect);
-		const int frameWidth = windowRect.Width() - clientRect.Width();
-		const int frameHeight = windowRect.Height() - clientRect.Height();
 		desiredWidth = std::max(desiredWidth, columnsWidth + margin * 2 + frameWidth);
 		desiredHeight = std::max(desiredHeight,
 			topContentBottom + scaled(GetSafeHwnd(), 8) + headerHeight
-			+ rowHeight * static_cast<int>(displayRows.size()) + statusHeight + margin * 2 + frameHeight);
+			+ rowHeight * static_cast<int>(displayRows.size()) + statusHeight + gap + frameHeight);
 	}
 	return CSize(std::min(workWidth, desiredWidth), std::min(workHeight, desiredHeight));
+}
+
+void WinMTRDialog::resizeWindowToContent()
+{
+	const CSize desired = minimumWindowSize();
+	CRect current;
+	GetWindowRect(current);
+	MONITORINFO monitor{ .cbSize = sizeof(MONITORINFO) };
+	GetMonitorInfoW(MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST), &monitor);
+	const int desiredWidth = static_cast<int>(desired.cx);
+	const int desiredHeight = static_cast<int>(desired.cy);
+	const int left = std::clamp(static_cast<int>(current.left), static_cast<int>(monitor.rcWork.left),
+		static_cast<int>(monitor.rcWork.right) - desiredWidth);
+	const int top = std::clamp(static_cast<int>(current.top), static_cast<int>(monitor.rcWork.top),
+		static_cast<int>(monitor.rcWork.bottom) - desiredHeight);
+	if (current.left != left || current.top != top
+		|| current.Width() != desiredWidth || current.Height() != desiredHeight) {
+		SetWindowPos(nullptr, left, top, desiredWidth, desiredHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+	}
 }
 
 void WinMTRDialog::OnSizing(UINT side, LPRECT rect)
@@ -801,10 +895,14 @@ HBRUSH WinMTRDialog::OnCtlColor(CDC* dc, CWnd* window, UINT controlType)
 	const int id = window == nullptr ? 0 : window->GetDlgCtrlID();
 	const bool isGroupBox = id == IDC_GROUP_TARGET || id == IDC_GROUP_ACTIONS
 		|| id == IDC_GROUP_PUBLIC_INFO;
+	const bool isPublicValue = id == IDC_STATIC_PUBLIC_IP || id == IDC_STATIC_PUBLIC_HOSTNAME
+		|| id == IDC_STATIC_PUBLIC_COUNTRY || id == IDC_STATIC_PUBLIC_CITY
+		|| id == IDC_STATIC_PUBLIC_ASN || id == IDC_STATIC_PUBLIC_ISP;
 	if (controlType == CTLCOLOR_STATIC || (controlType == CTLCOLOR_BTN && isGroupBox)) {
 		const COLORREF background = GetSysColor(COLOR_3DFACE);
 		dc->SetBkMode(OPAQUE);
 		dc->SetBkColor(background);
+		if (isPublicValue) dc->SetTextColor(RGB(32, 72, 112));
 		brush = GetSysColorBrush(COLOR_3DFACE);
 	}
 	return brush;
@@ -981,50 +1079,31 @@ void WinMTRDialog::adjustWindowForRows()
 	const int columnsWidth = naturalColumnsWidth > 0
 		? naturalColumnsWidth
 		: scaled(GetSafeHwnd(), 830);
-
-	CRect itemRect;
-	int rowHeight = scaled(GetSafeHwnd(), 22);
-	if (listMtr.GetItemRect(0, itemRect, LVIR_BOUNDS)) rowHeight = itemRect.Height();
-	int headerHeight = scaled(GetSafeHwnd(), 24);
-	if (HWND header = ListView_GetHeader(listMtr.GetSafeHwnd()); header != nullptr) {
-		RECT headerRect{};
-		if (::GetWindowRect(header, &headerRect)) headerHeight = headerRect.bottom - headerRect.top;
-	}
-	int statusHeight = scaled(GetSafeHwnd(), 25);
-	if (::IsWindow(statusBar.GetSafeHwnd())) {
-		CRect statusRect;
-		statusBar.GetWindowRect(statusRect);
-		statusHeight = statusRect.Height();
-	}
-
 	const int margin = scaled(GetSafeHwnd(), 10);
-	const int desiredClientWidth = std::max(scaled(GetSafeHwnd(), 830), columnsWidth + margin * 2);
-	const int desiredClientHeight = topContentBottom + scaled(GetSafeHwnd(), 8) + headerHeight +
-		rowHeight * static_cast<int>(displayRows.size()) + statusHeight + margin * 2;
+	const CSize required = minimumWindowSize();
 	CRect currentWindow;
-	CRect currentClient;
 	GetWindowRect(currentWindow);
-	GetClientRect(currentClient);
-	const int frameWidth = currentWindow.Width() - currentClient.Width();
-	const int frameHeight = currentWindow.Height() - currentClient.Height();
 	MONITORINFO monitor{ .cbSize = sizeof(MONITORINFO) };
 	GetMonitorInfoW(MonitorFromWindow(GetSafeHwnd(), MONITOR_DEFAULTTONEAREST), &monitor);
 	const int maximumWidth = monitor.rcWork.right - monitor.rcWork.left;
 	const int maximumHeight = monitor.rcWork.bottom - monitor.rcWork.top;
-	const int contentWidth = desiredClientWidth + frameWidth;
-	const int contentHeight = desiredClientHeight + frameHeight;
 	const bool routeShrank = lastAutoRowCount != 0 && displayRows.size() < lastAutoRowCount;
 	const bool resizeExactly = firstDataResize || routeShrank;
+	const int requiredWidth = static_cast<int>(required.cx);
+	const int requiredHeight = static_cast<int>(required.cy);
 	const int desiredWidth = std::min(maximumWidth,
-		resizeExactly ? contentWidth : std::max(currentWindow.Width(), contentWidth));
+		resizeExactly ? requiredWidth : std::max(static_cast<int>(currentWindow.Width()), requiredWidth));
 	const int desiredHeight = std::min(maximumHeight,
-		resizeExactly ? contentHeight : std::max(currentWindow.Height(), contentHeight));
+		resizeExactly ? requiredHeight : std::max(static_cast<int>(currentWindow.Height()), requiredHeight));
 	const int desiredLeft = std::clamp(static_cast<int>(currentWindow.left), static_cast<int>(monitor.rcWork.left),
 		static_cast<int>(monitor.rcWork.right) - desiredWidth);
 	const int desiredTop = std::clamp(static_cast<int>(currentWindow.top), static_cast<int>(monitor.rcWork.top),
 		static_cast<int>(monitor.rcWork.bottom) - desiredHeight);
-	SetWindowPos(nullptr, desiredLeft, desiredTop, desiredWidth, desiredHeight,
-		SWP_NOZORDER | SWP_NOACTIVATE);
+	if (currentWindow.left != desiredLeft || currentWindow.top != desiredTop
+		|| currentWindow.Width() != desiredWidth || currentWindow.Height() != desiredHeight) {
+		SetWindowPos(nullptr, desiredLeft, desiredTop, desiredWidth, desiredHeight,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+	}
 	lastAutoRowCount = displayRows.size();
 	CRect client;
 	GetClientRect(client);
@@ -1160,6 +1239,7 @@ void WinMTRDialog::updateNetworkInfoSummary()
 	CRect client;
 	GetClientRect(client);
 	layoutControls(client.Width(), client.Height());
+	resizeWindowToContent();
 }
 
 void WinMTRDialog::showNetworkInfoDialog()

@@ -426,52 +426,63 @@ void parseOrganization(std::wstring organization, IpConnectionInfo& info)
 	return { asn, provider };
 }
 
-void mergeMissing(IpConnectionInfo& target, const IpConnectionInfo& fallback)
+[[nodiscard]] bool hasMetadata(const IpConnectionInfo& info) noexcept
 {
-	if (target.address.empty()) target.address = fallback.address;
-	if (target.hostname.empty()) target.hostname = fallback.hostname;
-	if (target.city.empty()) target.city = fallback.city;
-	if (target.region.empty()) target.region = fallback.region;
-	if (target.country.empty()) target.country = fallback.country;
-	if (target.countryCode.empty()) target.countryCode = fallback.countryCode;
-	if (target.asn.empty()) target.asn = fallback.asn;
-	if (target.isp.empty()) target.isp = fallback.isp;
+	return !info.hostname.empty() || !info.city.empty() || !info.region.empty()
+		|| !info.country.empty() || !info.countryCode.empty() || !info.asn.empty()
+		|| !info.isp.empty();
 }
 
-void enrich(IpConnectionInfo& info, std::vector<std::wstring>& sources, std::stop_token stopToken,
-	bool allowIpApi, bool resolveHostname)
+void finalize(IpConnectionInfo& info, std::stop_token stopToken, bool resolveHostname)
 {
-	if (!info.available() || stopToken.stop_requested()) return;
-	std::vector<std::wstring> ownSources;
-	if (!info.source.empty()) ownSources.emplace_back(info.source);
-	const bool metadataMissing = info.city.empty() || info.region.empty() || info.countryCode.empty() ||
-		info.asn.empty() || info.isp.empty();
-	if (allowIpApi && metadataMissing) {
-		const auto body = httpGet(WinMTRBranding::sources::ipapi_name,
-			L"/" + percentEncode(info.address) + L"/json/", stopToken);
-		if (body) {
-			auto fallback = parseIpApi(*body);
-			if (fallback.available()) {
-				mergeMissing(info, fallback);
-				addUnique(sources, std::wstring(WinMTRBranding::sources::ipapi_name));
-				addUnique(ownSources, std::wstring(WinMTRBranding::sources::ipapi_name));
-			}
-		}
-	}
-	if ((info.asn.empty() || info.isp.empty()) && isPublicAddress(info.address) && !stopToken.stop_requested()) {
-		const auto [asn, provider] = queryCymru(info.address);
-		if (!asn.empty()) {
-			if (info.asn.empty()) info.asn = asn;
-			if (info.isp.empty()) info.isp = provider;
-			addUnique(sources, std::wstring(WinMTRBranding::sources::team_cymru_name));
-			addUnique(ownSources, std::wstring(WinMTRBranding::sources::team_cymru_name));
-		}
-	}
+	if (!info.available()) return;
 	if (resolveHostname && info.hostname.empty() && !stopToken.stop_requested()) {
 		info.hostname = reverseName(info.address);
 	}
 	if (!info.countryCode.empty()) info.country = localizedCountry(info.countryCode);
-	info.source = join(ownSources, L"、");
+}
+
+[[nodiscard]] IpConnectionInfo queryCurrentFamily(ADDRESS_FAMILY family, std::stop_token stopToken)
+{
+	IpConnectionInfo selected;
+	const auto primaryName = family == AF_INET
+		? WinMTRBranding::sources::ipinfo_ipv4_name
+		: WinMTRBranding::sources::ipinfo_ipv6_name;
+	if (!stopToken.stop_requested()) {
+		if (const auto body = httpGet(primaryName, L"/json", stopToken)) {
+			auto candidate = parseIpInfo(*body);
+			if (expectedFamily(candidate.address, family)) {
+				candidate.source = primaryName;
+				selected = std::move(candidate);
+			}
+		}
+	}
+
+	// A fallback is selected only when the primary source did not return a
+	// usable address. Never merge fields from two services into one result.
+	if (!selected.available() && !stopToken.stop_requested()) {
+		if (const auto body = httpGet(WinMTRBranding::sources::ipapi_name, L"/json/", stopToken)) {
+			auto candidate = parseIpApi(*body);
+			if (expectedFamily(candidate.address, family)) {
+				candidate.source = WinMTRBranding::sources::ipapi_name;
+				selected = std::move(candidate);
+			}
+		}
+	}
+	if (!selected.available() && !stopToken.stop_requested()) {
+		const auto fallbackName = family == AF_INET
+			? WinMTRBranding::sources::ipify_ipv4_name
+			: WinMTRBranding::sources::ipify_ipv6_name;
+		if (const auto body = httpGet(fallbackName, L"/", stopToken)) {
+			const auto address = trim(utf8ToWide(*body));
+			if (expectedFamily(address, family)) {
+				selected.address = address;
+				selected.source = fallbackName;
+			}
+		}
+	}
+	finalize(selected, stopToken, true);
+	return selected;
 }
 
 [[nodiscard]] std::vector<std::wstring> localDnsServers()
@@ -593,9 +604,41 @@ IpConnectionInfo queryAddress(const std::wstring& address, std::stop_token stopT
 {
 	IpConnectionInfo result;
 	if (!isPublicAddress(address) || stopToken.stop_requested()) return result;
-	result.address = address;
-	std::vector<std::wstring> sources;
-	enrich(result, sources, stopToken, true, resolveHostname);
+	SOCKADDR_INET parsed{};
+	(void)parseAddress(address, parsed);
+	const auto primaryName = parsed.si_family == AF_INET6
+		? WinMTRBranding::sources::ipinfo_ipv6_name
+		: WinMTRBranding::sources::ipinfo_ipv4_name;
+	if (const auto body = httpGet(primaryName,
+		L"/" + percentEncode(address) + L"/json", stopToken)) {
+		auto candidate = parseIpInfo(*body);
+		if (hasMetadata(candidate)) {
+			candidate.address = address;
+			candidate.source = primaryName;
+			result = std::move(candidate);
+		}
+	}
+	if (!result.available() && !stopToken.stop_requested()) {
+		if (const auto body = httpGet(WinMTRBranding::sources::ipapi_name,
+			L"/" + percentEncode(address) + L"/json/", stopToken)) {
+			auto candidate = parseIpApi(*body);
+			if (hasMetadata(candidate)) {
+				candidate.address = address;
+				candidate.source = WinMTRBranding::sources::ipapi_name;
+				result = std::move(candidate);
+			}
+		}
+	}
+	if (!result.available() && !stopToken.stop_requested()) {
+		const auto [asn, provider] = queryCymru(address);
+		result.address = address;
+		if (!asn.empty()) {
+			result.asn = asn;
+			result.isp = provider;
+			result.source = WinMTRBranding::sources::team_cymru_name;
+		}
+	}
+	finalize(result, stopToken, resolveHostname);
 	return result;
 }
 
@@ -609,67 +652,24 @@ CurrentNetworkInfo queryCurrent(std::stop_token stopToken)
 		~WsaCleanup() { if (active) WSACleanup(); }
 	} cleanup{ wsaStarted };
 
-	if (!stopToken.stop_requested()) {
-		if (const auto body = httpGet(WinMTRBranding::sources::ipinfo_ipv4_name, L"/json", stopToken)) {
-			auto info = parseIpInfo(*body);
-			if (expectedFamily(info.address, AF_INET)) {
-				info.source = WinMTRBranding::sources::ipinfo_ipv4_name;
-				result.ipv4 = std::move(info);
-				addUnique(result.successfulSources, std::wstring(WinMTRBranding::sources::ipinfo_ipv4_name));
-			}
-		}
-	}
-	if (!result.ipv4.available() && !stopToken.stop_requested()) {
-		if (const auto body = httpGet(WinMTRBranding::sources::ipify_ipv4_name, L"/", stopToken)) {
-			const auto address = trim(utf8ToWide(*body));
-			if (expectedFamily(address, AF_INET)) {
-				result.ipv4.address = address;
-				result.ipv4.source = WinMTRBranding::sources::ipify_ipv4_name;
-				addUnique(result.successfulSources, std::wstring(WinMTRBranding::sources::ipify_ipv4_name));
-			}
-		}
-	}
-	if (result.ipv4.available()) enrich(result.ipv4, result.successfulSources, stopToken, true, true);
-
-	if (!stopToken.stop_requested()) {
-		if (const auto body = httpGet(WinMTRBranding::sources::ipinfo_ipv6_name, L"/json", stopToken)) {
-			auto info = parseIpInfo(*body);
-			if (expectedFamily(info.address, AF_INET6)) {
-				info.source = WinMTRBranding::sources::ipinfo_ipv6_name;
-				result.ipv6 = std::move(info);
-				addUnique(result.successfulSources, std::wstring(WinMTRBranding::sources::ipinfo_ipv6_name));
-			}
-		}
-	}
-	if (!result.ipv6.available() && !stopToken.stop_requested()) {
-		if (const auto body = httpGet(WinMTRBranding::sources::ipify_ipv6_name, L"/", stopToken)) {
-			const auto address = trim(utf8ToWide(*body));
-			if (expectedFamily(address, AF_INET6)) {
-				result.ipv6.address = address;
-				result.ipv6.source = WinMTRBranding::sources::ipify_ipv6_name;
-				addUnique(result.successfulSources, std::wstring(WinMTRBranding::sources::ipify_ipv6_name));
-			}
-		}
-	}
-	if (result.ipv6.available()) enrich(result.ipv6, result.successfulSources, stopToken, true, true);
+	result.ipv4 = queryCurrentFamily(AF_INET, stopToken);
+	if (!result.ipv4.source.empty()) addUnique(result.successfulSources, result.ipv4.source);
+	result.ipv6 = queryCurrentFamily(AF_INET6, stopToken);
+	if (!result.ipv6.source.empty()) addUnique(result.successfulSources, result.ipv6.source);
 
 	if (!stopToken.stop_requested()) {
 		queryWhoAmI(result.dns, result.successfulSources);
 		result.dns.localServers = localDnsServers();
-		if (!result.dns.localServers.empty()) {
-			addUnique(result.successfulSources, std::wstring(WinMTRBranding::sources::windows_network_name));
-		}
 		if (isPublicAddress(result.dns.publicAddress)) {
-			auto dnsMetadata = queryAddress(result.dns.publicAddress, stopToken, false);
+			auto dnsMetadata = queryAddress(result.dns.publicAddress, stopToken, true);
+			result.dns.hostname = dnsMetadata.hostname;
+			result.dns.city = dnsMetadata.city;
+			result.dns.region = dnsMetadata.region;
+			result.dns.country = dnsMetadata.country;
+			result.dns.countryCode = dnsMetadata.countryCode;
+			result.dns.asn = dnsMetadata.asn;
 			result.dns.provider = dnsMetadata.isp;
-			result.dns.location = join(std::vector<std::wstring>{ dnsMetadata.city, dnsMetadata.country }, L"，");
-			if (!dnsMetadata.source.empty()) {
-				for (const auto& source : std::vector<std::wstring>{
-					std::wstring(WinMTRBranding::sources::ipapi_name),
-					std::wstring(WinMTRBranding::sources::team_cymru_name) }) {
-					if (dnsMetadata.source.find(source) != std::wstring::npos) addUnique(result.successfulSources, source);
-				}
-			}
+			if (!dnsMetadata.source.empty()) addUnique(result.successfulSources, dnsMetadata.source);
 		}
 	}
 	result.complete = true;
@@ -680,37 +680,47 @@ std::wstring formatDetails(const CurrentNetworkInfo& info)
 {
 	using namespace WinMTRBranding::network_strings;
 	std::wostringstream out;
+	const auto field = [&](std::wstring_view label, const std::wstring& value) {
+		out << label << L'\t' << shown(value) << L"\r\n";
+	};
 	const auto section = [&](std::wstring_view title, const IpConnectionInfo& value) {
-		out << title << L"：\r\n"
-			<< L"  " << address << L"：" << shown(value.address) << L"\r\n"
-			<< L"  " << hostname << L"：" << shown(value.hostname) << L"\r\n"
-			<< L"  " << city << L"：" << shown(value.city) << L"\r\n"
-			<< L"  " << region << L"：" << shown(value.region) << L"\r\n"
-			<< L"  " << country << L"：" << shown(value.country) << L"\r\n"
-			<< L"  " << asn << L"：" << shown(value.asn) << L"\r\n"
-			<< L"  " << provider << L"：" << shown(value.isp) << L"\r\n";
+		out << title << L"\r\n";
+		field(address, value.address);
+		field(hostname, value.hostname);
+		field(city, value.city);
+		field(region, value.region);
+		field(country, value.country);
+		field(asn, value.asn);
+		field(provider, value.isp);
 	};
 	section(ipv4_section, info.ipv4);
 	out << L"\r\n";
 	section(ipv6_section, info.ipv6);
-	out << L"\r\n" << recursive_dns_section << L"：\r\n"
-		<< L"  " << dns_public_address << L"：" << shown(info.dns.publicAddress) << L"\r\n"
-		<< L"  " << dns_location_provider << L"：";
-	std::vector<std::wstring> dnsDescription;
-	if (!info.dns.location.empty()) dnsDescription.push_back(info.dns.location);
-	if (!info.dns.provider.empty()) dnsDescription.push_back(info.dns.provider);
-	out << shown(join(dnsDescription, L"／")) << L"\r\n"
-		<< L"  " << ecs << L"：";
+	out << L"\r\n" << recursive_dns_section << L"\r\n";
+	field(address, info.dns.publicAddress);
+	field(hostname, info.dns.hostname);
+	field(city, info.dns.city);
+	field(region, info.dns.region);
+	field(country, info.dns.country);
+	field(asn, info.dns.asn);
+	field(provider, info.dns.provider);
+	std::wstring ecsValue;
 	switch (info.dns.ecsSupport) {
 	case EcsSupport::supported:
-		out << ecs_supported;
-		if (!info.dns.ecsSubnet.empty()) out << L"：" << info.dns.ecsSubnet;
+		ecsValue = ecs_supported;
+		if (!info.dns.ecsSubnet.empty()) ecsValue.append(L"（").append(info.dns.ecsSubnet).append(L"）");
 		break;
-	case EcsSupport::unsupported: out << ecs_unsupported; break;
-	default: out << ecs_unknown; break;
+	case EcsSupport::unsupported: ecsValue = ecs_unsupported; break;
+	default: ecsValue = ecs_unknown; break;
 	}
-	out << L"\r\n  " << local_dns << L"：" << shown(join(info.dns.localServers, L"、")) << L"\r\n"
-		<< L"\r\n" << sources << L"：" << shown(join(info.successfulSources, L"、")) << L"\r\n";
+	field(ecs, ecsValue);
+	out << L"\r\n" << local_dns << L"\r\n";
+	if (info.dns.localServers.empty()) out << L'\t' << unavailable << L"\r\n";
+	else {
+		for (const auto& server : info.dns.localServers) out << L'\t' << server << L"\r\n";
+	}
+	out << L"\r\n";
+	field(sources, join(info.successfulSources, L"、"));
 	return out.str();
 }
 
