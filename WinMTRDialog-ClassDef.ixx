@@ -110,6 +110,7 @@ private:
 	bool listIsVisible = false;
 	bool firstDataResize = true;
 	std::size_t lastAutoRowCount = 0;
+	int naturalColumnsWidth = 0;
 	int topContentBottom = 0;
 
 	std::wstring defaultHostname;
