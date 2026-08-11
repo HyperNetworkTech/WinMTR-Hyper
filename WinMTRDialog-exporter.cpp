@@ -151,6 +151,13 @@ struct ExportRow final {
 			alternative.responder = true;
 			alternative.cells[0] = L"  + " + responder.getName();
 			alternative.cells[1] = std::to_wstring(hop.hop);
+			alternative.cells[4] = std::to_wstring(responder.hit_count);
+			alternative.cells[5] = std::to_wstring(responder.best_ms);
+			alternative.cells[6] = std::format(L"{:.1f}", responder.getAverageMs());
+			alternative.cells[7] = std::to_wstring(responder.worst_ms);
+			alternative.cells[8] = std::to_wstring(responder.last_ms);
+			alternative.cells[9] = std::format(L"{:.1f}", responder.jitter_ms);
+			alternative.cells[10] = std::format(L"{:.1f}", responder.stddev_ms);
 			alternative.cells[11] = responder.country;
 			alternative.cells[12] = responder.asn;
 			alternative.cells[13] = responder.isp;
@@ -341,6 +348,15 @@ struct ExportRow final {
 				<< L"\","
 				<< L"\"hit_count\":" << responder.hit_count << L','
 				<< L"\"last_seen_sequence\":" << responder.last_seen_sequence << L','
+				<< L"\"best_ms\":" << responder.best_ms << L','
+				<< L"\"average_ms\":"
+				<< std::format(L"{:.2f}", responder.getAverageMs()) << L','
+				<< L"\"worst_ms\":" << responder.worst_ms << L','
+				<< L"\"last_ms\":" << responder.last_ms << L','
+				<< L"\"jitter_ms\":" << std::format(L"{:.2f}", responder.jitter_ms) << L','
+				<< L"\"recent_jitter_ms\":"
+				<< std::format(L"{:.2f}", responder.recent_jitter_ms) << L','
+				<< L"\"stddev_ms\":" << std::format(L"{:.2f}", responder.stddev_ms) << L','
 				<< L"\"host\":\"" << jsonEscape(responder.getName()) << L"\","
 				<< L"\"ip\":\"" << jsonEscape(addr_to_string(responder.addr)) << L"\","
 				<< L"\"country\":\"" << jsonEscape(responder.country) << L"\","

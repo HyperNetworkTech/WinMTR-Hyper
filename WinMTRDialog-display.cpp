@@ -1186,6 +1186,15 @@ int WinMTRDialog::DisplayRedraw()
 		setCell(row, 9, hop.returned == 0 ? empty : std::format(L"{:.1f}", hop.jitter));
 		setCell(row, 10, hop.returned == 0 ? empty : std::format(L"{:.1f}", hop.stddev));
 	};
+	const auto setResponderStatistics = [&](int row, const s_netresponder& responder) {
+		setCell(row, 4, std::to_wstring(responder.hit_count));
+		setCell(row, 5, std::to_wstring(responder.best_ms));
+		setCell(row, 6, std::format(L"{:.1f}", responder.getAverageMs()));
+		setCell(row, 7, std::to_wstring(responder.worst_ms));
+		setCell(row, 8, std::to_wstring(responder.last_ms));
+		setCell(row, 9, std::format(L"{:.1f}", responder.jitter_ms));
+		setCell(row, 10, std::format(L"{:.1f}", responder.stddev_ms));
+	};
 
 	for (size_t index = 0; index < snapshot.hops.size();) {
 		const auto& hop = snapshot.hops[index];
@@ -1229,6 +1238,7 @@ int WinMTRDialog::DisplayRedraw()
 				{ DisplayRowKind::responder, hop.hop, hop.hop, responderIndex,
 					addr_to_string(responder.addr) });
 			setCell(responderRow, 1, std::to_wstring(hop.hop));
+			setResponderStatistics(responderRow, responder);
 			setCell(responderRow, 11, responder.country);
 			setCell(responderRow, 12, responder.asn);
 			setCell(responderRow, 13, responder.isp);

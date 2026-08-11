@@ -77,6 +77,10 @@ def main() -> None:
         "id", "host", "ip", "country", "asn", "isp", "metadata_source",
         "metadata_failure_reason",
     }
+    responder_metric_fields = {
+        "best_ms", "average_ms", "worst_ms", "last_ms", "jitter_ms",
+        "recent_jitter_ms", "stddev_ms",
+    }
 
     for index, hop in enumerate(report["hops"]):
         name = f"hop[{index}]"
@@ -110,6 +114,9 @@ def main() -> None:
             nonnegative_integer(responder["hit_count"], f"{responder_name}.hit_count")
             nonnegative_integer(responder["last_seen_sequence"],
                                 f"{responder_name}.last_seen_sequence")
+            for field in responder_metric_fields:
+                if field in responder:
+                    finite_number(responder[field], f"{responder_name}.{field}")
 
     require("𠀀" in report["target"] and "🌐" in report["target"],
             "golden sample lost non-BMP Unicode coverage")

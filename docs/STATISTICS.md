@@ -54,6 +54,10 @@ loss_percent = completed == 0 ? 0 : 100 × timed_out / completed
 - `jitter_ms` 是 RTT 連續差的 1/16 EWMA：
   `J(n) = J(n-1) + (abs(RTT(n)-RTT(n-1)) - J(n-1)) / 16`。
   這是 RTT variation 的平滑值，不宣稱為單向 transit jitter。
+- ECMP responder 另外維護相同公式的 best／average／worst／last、sample
+  standard deviation 與 jitter。Responder 沒有獨立的 Loss 或 Sent：探測是送往
+  TTL／目標而不是指定 responder，因此將流量分流比例換算成 loss 會造成誤導；
+  `hit_count` 才是該 responder 實際回覆的樣本數。
 
 ## 路徑與 cache
 

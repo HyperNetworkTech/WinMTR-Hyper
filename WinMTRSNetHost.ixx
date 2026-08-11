@@ -73,11 +73,53 @@ export struct s_netresponder final {
 	std::uint64_t last_seen_sequence = 0;
 	std::uint64_t last_reply_tick = 0;
 	std::uint64_t hit_count = 0;
+	std::uint64_t total_ms = 0;
+	unsigned last_ms = 0;
+	unsigned best_ms = 0;
+	unsigned worst_ms = 0;
+	double mean_ms = 0.0;
+	double m2_ms = 0.0;
+	double stddev_ms = 0.0;
+	double jitter_ms = 0.0;
+	double recent_jitter_ms = 0.0;
+	double previous_reply_ms = 0.0;
+	bool has_previous_reply = false;
 
 	[[nodiscard]]
 	std::wstring getName() const
 	{
 		return name.empty() ? addr_to_string(addr) : name;
+	}
+
+	[[nodiscard]] double getAverageMs() const noexcept
+	{
+		return hit_count == 0 ? 0.0 : mean_ms;
+	}
+
+	void noteReply(unsigned round_trip_ms, std::uint64_t sequence,
+		std::uint64_t tick) noexcept
+	{
+		last_seen_sequence = sequence;
+		last_reply_tick = tick;
+		++hit_count;
+		total_ms += round_trip_ms;
+		last_ms = round_trip_ms;
+		if (hit_count == 1 || round_trip_ms < best_ms) best_ms = round_trip_ms;
+		if (hit_count == 1 || round_trip_ms > worst_ms) worst_ms = round_trip_ms;
+
+		const auto sample = static_cast<double>(round_trip_ms);
+		const auto delta = sample - mean_ms;
+		mean_ms += delta / static_cast<double>(hit_count);
+		m2_ms += delta * (sample - mean_ms);
+		stddev_ms = hit_count > 1
+			? std::sqrt(m2_ms / static_cast<double>(hit_count - 1u))
+			: 0.0;
+		if (has_previous_reply) {
+			recent_jitter_ms = std::abs(sample - previous_reply_ms);
+			jitter_ms += (recent_jitter_ms - jitter_ms) / 16.0;
+		}
+		previous_reply_ms = sample;
+		has_previous_reply = true;
 	}
 };
 
@@ -282,7 +324,7 @@ export struct s_nethost final {
 
 	[[nodiscard]]
 	s_netresponder& observeResponder(const SOCKADDR_INET& responder_address,
-		std::uint64_t sequence, std::uint64_t tick)
+		unsigned round_trip_ms, std::uint64_t sequence, std::uint64_t tick)
 	{
 		auto found = responders.begin();
 		for (; found != responders.end(); ++found) {
@@ -311,9 +353,7 @@ export struct s_nethost final {
 		}
 
 		auto& primary = responders.front();
-		primary.last_seen_sequence = sequence;
-		primary.last_reply_tick = tick;
-		++primary.hit_count;
+		primary.noteReply(round_trip_ms, sequence, tick);
 		addr = primary.addr;
 		name = primary.name;
 		country = primary.country;

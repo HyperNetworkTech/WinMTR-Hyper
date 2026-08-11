@@ -1189,7 +1189,8 @@ void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 		display_max_ttl = std::max(display_max_ttl,
 			std::clamp(ttl, session_start_ttl, session_options.max_hops));
 		if (is_destination) hop.last_destination_reply_tick = tick;
-		auto& observed = hop.observeResponder(responder, ++reply_sequence, tick);
+		auto& observed = hop.observeResponder(responder, round_trip_ms,
+			++reply_sequence, tick);
 		const auto address_key = addr_to_string(responder);
 		auto cached = responder_lookup_cache.find(address_key);
 		const auto now = GetTickCount64();
