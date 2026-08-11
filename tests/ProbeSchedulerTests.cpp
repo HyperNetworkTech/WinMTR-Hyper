@@ -2,6 +2,7 @@
 #include "WinMTRProbeParameters.h"
 #include "WinMTRProviderJson.h"
 #include "WinMTRAddressPolicy.h"
+#include "WinMTRCliValueParser.h"
 #include "WinMTRJson.h"
 #include "WinMTRSerialization.h"
 #include "WinMTRRoutePolicy.h"
@@ -500,6 +501,32 @@ void test_provider_json_fields()
 		"non-string provider fields were accepted");
 }
 
+void test_cli_value_parser_boundaries()
+{
+	using winmtr::cli_values::parse_floating_point;
+	using winmtr::cli_values::parse_integer;
+	using winmtr::cli_values::parse_ranged_integer;
+	long integer = 0;
+	require(parse_integer(L"+42", integer) && integer == 42,
+		"signed decimal CLI integer was rejected");
+	require(parse_integer(L"-1", integer) && integer == -1,
+		"negative CLI integer was rejected");
+	require(!parse_integer(L"", integer) && !parse_integer(L"12x", integer)
+		&& !parse_integer(L"999999999999999999999999999999", integer),
+		"invalid or overflowing CLI integer was accepted");
+	require(parse_ranged_integer(L"64", 1, 64, integer) && integer == 64
+		&& !parse_ranged_integer(L"65", 1, 64, integer),
+		"CLI integer range boundary changed");
+	double floating = 0.0;
+	require(parse_floating_point(L"0.1", floating) && std::abs(floating - 0.1) < 1e-12,
+		"finite CLI floating-point value was rejected");
+	require(!parse_floating_point(L"nan", floating)
+		&& !parse_floating_point(L"inf", floating)
+		&& !parse_floating_point(L"1.0tail", floating)
+		&& !parse_floating_point(L"1e9999", floating),
+		"non-finite, trailing or overflowing CLI float was accepted");
+}
+
 void fuzz_json_parser_offline()
 {
 	std::uint64_t state = 0x243f6a8885a308d3ull;
@@ -516,6 +543,27 @@ void fuzz_json_parser_offline()
 		(void)winmtr::json::get_string(input, "ip");
 		(void)winmtr::provider_json::parse_ipinfo(input);
 		(void)winmtr::provider_json::parse_ipapi(input);
+	}
+}
+
+void fuzz_cli_value_parser_offline()
+{
+	std::uint64_t state = 0x13198a2e03707344ull;
+	for (std::size_t iteration = 0; iteration < 10'000; ++iteration) {
+		state ^= state << 13;
+		state ^= state >> 7;
+		state ^= state << 17;
+		const std::size_t length = static_cast<std::size_t>(state % 128u);
+		std::wstring input(length, L'\0');
+		for (wchar_t& value : input) {
+			state = state * 6364136223846793005ull + 1442695040888963407ull;
+			value = static_cast<wchar_t>((state >> 56) & 0x7fu);
+		}
+		long integer = 0;
+		double floating = 0.0;
+		(void)winmtr::cli_values::parse_integer(input.c_str(), integer);
+		(void)winmtr::cli_values::parse_ranged_integer(input.c_str(), -1'000, 1'000, integer);
+		(void)winmtr::cli_values::parse_floating_point(input.c_str(), floating);
 	}
 }
 
@@ -540,7 +588,9 @@ int main()
 		test_route_policy_scripted_changes();
 		test_probe_packet_parameters();
 		test_provider_json_fields();
+		test_cli_value_parser_boundaries();
 		fuzz_json_parser_offline();
+		fuzz_cli_value_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;
 	}

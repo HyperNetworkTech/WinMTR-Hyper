@@ -33,6 +33,7 @@ module;
 #include <cwchar>
 #include <string>
 #include "WinMTRBranding.h"
+#include "WinMTRCliValueParser.h"
 
 export module WinMTR.CommandLineParser;
 
@@ -118,32 +119,6 @@ namespace {
 		return value[0] == L'-' && _wcsicmp(value + 1, long_name) == 0;
 	}
 
-	[[nodiscard]] bool ParseInteger(const wchar_t* text, long& value) noexcept
-	{
-		errno = 0;
-		wchar_t* end = nullptr;
-		const auto parsed = std::wcstol(text, &end, 10);
-		if (text == end || end == nullptr || *end != L'\0' || errno == ERANGE) {
-			return false;
-		}
-
-		value = parsed;
-		return true;
-	}
-
-	[[nodiscard]] bool ParseFloatingPoint(const wchar_t* text, double& value) noexcept
-	{
-		errno = 0;
-		wchar_t* end = nullptr;
-		const auto parsed = std::wcstod(text, &end);
-		if (text == end || end == nullptr || *end != L'\0' || errno == ERANGE ||
-			!std::isfinite(parsed)) {
-			return false;
-		}
-
-		value = parsed;
-		return true;
-	}
 }
 
 void utils::CWinMTRCommandLineParser::ReportError(
@@ -354,7 +329,8 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 	const auto option_name = PendingOptionName();
 	next = expect_next::none;
 	const auto parseRangedInteger = [&](long minimum, long maximum, long& parsed) {
-		if (!ParseInteger(pszParam, parsed) || parsed < minimum || parsed > maximum) {
+		if (!winmtr::cli_values::parse_ranged_integer(
+			pszParam, minimum, maximum, parsed)) {
 			ReportInvalidValue(option_name, pszParam);
 			return false;
 		}
@@ -365,7 +341,7 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 	case expect_next::lru:
 	{
 		long parsed = 0;
-		if (!ParseInteger(pszParam, parsed) ||
+		if (!winmtr::cli_values::parse_integer(pszParam, parsed) ||
 			parsed < static_cast<long>(WinMTRUtils::MIN_MAX_LRU) ||
 			parsed > static_cast<long>(WinMTRUtils::MAX_MAX_LRU)) {
 			ReportInvalidValue(option_name, pszParam);
@@ -379,7 +355,7 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 	case expect_next::interval:
 	{
 		double parsed = 0.0;
-		if (!ParseFloatingPoint(pszParam, parsed) ||
+		if (!winmtr::cli_values::parse_floating_point(pszParam, parsed) ||
 			parsed < WinMTRUtils::MIN_INTERVAL ||
 			parsed > WinMTRUtils::MAX_INTERVAL) {
 			ReportInvalidValue(option_name, pszParam);
@@ -393,7 +369,7 @@ void utils::CWinMTRCommandLineParser::ParseParam(
 	case expect_next::ping_size:
 	{
 		long parsed = 0;
-		if (!ParseInteger(pszParam, parsed) ||
+		if (!winmtr::cli_values::parse_integer(pszParam, parsed) ||
 			parsed < static_cast<long>(WinMTRUtils::MIN_PING_SIZE) ||
 			parsed > static_cast<long>(WinMTRUtils::MAX_PING_SIZE)) {
 			ReportInvalidValue(option_name, pszParam);

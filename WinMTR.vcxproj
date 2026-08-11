@@ -1411,6 +1411,7 @@
     <ClInclude Include="Resource.h" />
     <ClInclude Include="WinMTRAddressPolicy.h" />
     <ClInclude Include="WinMTRBranding.h" />
+    <ClInclude Include="WinMTRCliValueParser.h" />
     <ClInclude Include="WinMTRGlobal.h" />
     <ClInclude Include="WinMTRJson.h" />
     <ClInclude Include="WinMTRMain.h" />
