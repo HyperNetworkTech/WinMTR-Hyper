@@ -1,94 +1,134 @@
-﻿WinMTR – Appnor's Free Network Diagnostic Tool
+# WinMTR v1.00 (Hyper Network Technology LTD)
 
-Thank you for downloading WinMTR v0.93!
+WinMTR 是 Windows 圖形化網路診斷工具，將路由追蹤與持續 ICMP
+延遲／丟包統計整合在同一個精簡介面。此版本以原始 WinMTR 為基礎，
+完整採用繁體中文（台灣）介面，並改善 IPv4、IPv6、多路徑與匯出流程。
 
-# About
+公司網站：[Hyper Network Technology LTD](https://hypernetwork.tw)
 
-WinMTR is a free MS Windows visual application that combines the functionality of the traceroute and ping in a single network diagnostic tool. WinMTR is Open Source Software, maintained by Appnor MSP, a fully managed hosting & cloud provider.
+## 支援範圍
 
-It was started in 2000 by Vasile Laurentiu Stanimir  as a clone for the popular Matt’s Traceroute (hence MTR) Linux/UNIX utility. 
+- Windows 7 SP1、Windows 8、Windows 8.1、Windows 10、Windows 11。
+- 僅提供 x64（64 位元）版本，不支援 32 位元或 ARM64。
+- 一般使用者權限即可執行。
+- 核心路由追蹤不需要 Npcap、WinDivert、封包擷取驅動或額外執行階段。
+- 使用 Windows 內建 ICMP API；目前不提供 TCP、UDP、SCTP、MPLS
+  延伸資訊或原始封包擷取。
 
-# License & Redistribution
+Windows 7 建議安裝 SP1、系統安全性更新、TLS 1.2 與最新根憑證。
+若 HTTPS 或憑證功能過舊，路由追蹤仍可使用，但「目前網路資訊」的
+外部查詢可能無法完成。
 
-WinMTR is offered as Open Source Software under GPL v2. 
-Read more about the licensing conditions: http://www.gnu.org/licenses/gpl-2.0.html
-Download the code from: https://github.com/leeter/WinMTR-refresh
+## 主要功能
 
-# Installation
+- IPv4 與 IPv6 路由追蹤，可單獨或同時啟用。
+- 以完整路徑為循環持續探測，停止時等候已送出的最後一批封包完成。
+- 顯示丟包、已送、已收、最佳／平均／最差／最近延遲、抖動與標準差。
+- 顯示國家、ASN 與 ISP；背景查詢不阻塞 ICMP 探測。
+- 保留同一跳的 ECMP 多個回覆來源，畫面顯示上限與完整匯出彼此獨立。
+- 將連續無回應跳數合併顯示，同時保留原始跳數資料。
+- 節點詳細資料支援一般節點、ECMP 替代路徑與無回應區間。
+- 可複製文字／HTML，或匯出 TXT、HTML、CSV、JSON。
+- 可將完整程式視窗截圖至剪貼簿。
+- 分享前檢查第一個實際探測跳數是否已累積 100 個封包。
+- 保存追蹤選項與目標主機歷程；可單獨清除歷程。
 
-You will get a .zip archive containing two folders WinMTR-32 and WinMTR-64.
-Both contain two files: WinMTR.exe and README.TXT.
-Just extract the WinMTR.exe for your platform (32 or 64 bit) and click to run it.
-If you don’t know what version you need, just click on both files and see which one works ;-)
-As you can see, WinMTR requires no other installation effort.
+## 基本操作
 
-Trick: You can copy the WinMTR.exe file in Windows/System32 so it’s accessible via the command line – cmd!
+1. 執行 `WinMTR.exe`。
+2. 在「主機」欄位輸入 IP 位址或主機名稱。
+3. 視需要開啟「選項」調整間隔、封包大小、最大跳數與其他設定。
+4. 按下「開始」，等候路由與統計資料累積。
+5. 按兩下路由列可檢視節點詳細資料。
+6. 使用「複製／匯出」或「截圖至剪貼簿」分享結果。
+7. 按下「停止」時，程式會先處理已送出但尚未完成的探測。
 
-## Supported platforms:
-* Windows 11 latest release
-* Windows 10x64 (until MS support drop)
+診斷丟包問題時，建議至少等第一個實際探測跳數累積 100 個封包後再分享。
 
-## Best effort platforms (the maintainer doesn't have hardware, and the compiler doesn't always cooperate)
-* Windows 11 on ARM
+## 命令列
 
-# Usage
+語法：
 
-Visual:
+```text
+WinMTR.exe [選項] "目標主機"
+```
 
-* Start WinMTR.
-* Write the name or IP ofthe host (e.g. google.com)
-* Press the Options buttonto configure ping size,maximum hops and pinginterval (the defaults areOK).
-* Push the Start buttonand wait.
-* Copy or export theresults in text or HTMLformat. Useful if you wantto document or file acomplaint with your ISP.
-* Click on Clear History to remove the hosts you have previously traced.
+支援的既有參數：
 
-Command line:
+| 參數 | 用途 |
+|---|---|
+| `--interval VALUE`、`-i VALUE` | 設定探測間隔（秒） |
+| `--size VALUE`、`-s VALUE` | 設定封包資料大小（位元組） |
+| `--maxLRU VALUE`、`-m VALUE` | 設定目標主機歷程上限 |
+| `--numeric`、`-n` | 本次啟動不解析主機名稱 |
+| `--help`、`-h` | 顯示繁體中文說明 |
 
-* Run winmtr.exe --help to see what are the options
-* Run winmtr hostname (e.g. winmtr www.yahoo.com)
+命令列指定的設定只覆蓋本次啟動所讀取的對應保存值。提供目標主機後，
+程式會自動開始追蹤。Unicode、空白與引號會由 Windows Unicode 命令列處理；
+含空白的目標請用雙引號包住。
 
-# Troubleshooting
+範例：
 
-a) I type in the address and nothing happens.
+```text
+WinMTR.exe --interval 0.5 --size 64 "example.com"
+WinMTR.exe -n "2001:db8::1"
+```
 
-Usually this has to do with lame anti-virus or firewall applications. Stop all that when doing debugging or when using WinMTR. Or, configure them properly.
+## 目前網路資訊與隱私
 
-b) I get an error saying the program cannot be executed.
+預設會在啟動時查詢目前公網 IP、地區、ASN、網路業者、遞迴 DNS 與 ECS
+狀態；可在「追蹤選項」關閉。查詢只用於顯示診斷資訊，不會變更 Windows
+DNS 設定。
 
-You are running the 64 bit version on a 32 bit platform. Try the WinMTR.exe stored in the WinMTR_x32 folder.
+可能依成功狀況使用下列來源：
 
-c) I get an error unspecified here.
+- IPv4：`ipinfo.io`，公網 IP 備援為 `api4.ipify.org`。
+- IPv6：`v6.ipinfo.io`，公網 IP 備援為 `api6.ipify.org`。
+- DNS／ECS：`whoami.ds.akahelp.net`。
+- 地區與網路業者備援：`ipapi.co`。
+- ASN／ISP 備援：Team Cymru ASN 查詢服務。
 
-Please report it to us to make sure it’s not a bug in the application.
+詳細資料只列出本次實際成功使用的來源。本程式不使用
+`edns.ip-api.com`，不偵測或要求 Google DNS，也不會把系統 DNS 改成
+`8.8.8.8` 或 `8.8.4.4`。
 
+## 建置
 
-# Old Changelog
-* 31.01.2011 - Version v0.92 is out, fixing reporting errors for very slow connections.
-* 11.01.2011 - Version v0.91 is out under GPL v2, by popular request.
-* 24.12.2010 - New version! for 32 and 64 bit Operating Systems. Now works on Windows 7 as a regular user. Various bug fixes. License changed from GPL to commercial, but not for long ;-) (v0.9) 
-* 20.01.2002 - Last entered hosts an options are now hold in registry. Home page and development moved to Sourceforge.
-* 05.09.2001 - Replace edit box with combo box which hold last entered host names. Fixed a memory leak which caused program to crash after a long time running. (v0.7)
-* 11.27.2000 - Added resizing support and flat buttons. (v0.6)
-11.26.2000 - Added copy data to clipboard and possibility to save data to file as text or HTML.(v0.5)
-* 08.03.2000 - Added double-click on host name in list for detailed information. (v0.4)
-* 08.02.2000 - Fixed ICMP error codes handling. Print an error message corresponding to ICP_HOST_UNREACHABLE error code instead of a empty line. (v0.3)
-* 08.01.2000 - Support for full command-line operations. (v0.2)
-* 07.28.2000 - First release. (v0.1)
+建議環境：
 
-# Bug Reports
+- Visual Studio 2022 Build Tools 或 Visual Studio 2022。
+- 「使用 C++ 的桌面開發」、MFC、Windows 10/11 SDK。
+- x64 編譯工具。
+- CMake 3.28 以上（使用 CMake 時）。
+- `vcpkg.json` 保留建置清單相容性；目前沒有第三方套件相依。
 
-Let us know if you identify bugs. Make sure you mention the WinMTR version. Also, we need as much info as possible about your Operating System and current setup. 
-Before submitting a bug make sure it is not something related to your own specific configurations (e.g. anti-viruses, firewalls). 
+使用 Visual Studio 專案：
 
-# Feature requests
+```powershell
+msbuild WinMTR.sln /m /p:Configuration=Release /p:Platform=x64
+```
 
-If you need some functionality from which others can also benefit, please let us know. We will try to integrate your request on our future releases.
-Specific features can be implemented on request under a commercial support agreement. Costs depend on complexity and timing. Contact us for a custom quotation. 
-If you are a developer planning to extend the current open source code, please let us know, so we can integrate it in the official tree
+使用 CMake：
 
+```powershell
+cmake -S . -B build -A x64
+cmake --build build --config Release
+```
 
-# Contact
+CMake 設定會拒絕 32 位元目標。專案使用靜態 MFC／CRT 的 Release 組態，
+讓一般使用者不必另外安裝 Visual C++ 執行階段。
 
-&copy; GPL v2 -  2010-2010 Appnor MSP S.A. - http://www.appnor.com
+發布前應至少在 Windows 7 SP1、Windows 10 與 Windows 11 的 x64 環境完成
+啟動、IPv4、IPv6、DPI 縮放、停止追蹤、剪貼簿與各匯出格式的實機驗證。
 
-&copy; GPL v2 - 2020-2023 Leetsoftwerx
+## 維護與自訂
+
+產品名稱、版本、公司、網址、字型及網路資訊來源集中在
+[`WinMTRBranding.h`](WinMTRBranding.h)。完整位置與同步規則請參閱
+[`CUSTOMIZATION.md`](CUSTOMIZATION.md)。
+
+## 授權
+
+本專案依 GNU General Public License version 2（GPL-2.0）授權；詳情請見
+[`LICENSE`](LICENSE)。原始 WinMTR 與後續維護者的著作權及貢獻資訊保留於
+原始碼與授權資料中。

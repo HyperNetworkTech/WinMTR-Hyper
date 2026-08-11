@@ -30,7 +30,9 @@ module;
 #pragma warning (disable : 4005)
 #include "targetver.h"
 #include <afxext.h>
+#include <afxlinkctrl.h>
 #include "resource.h"
+#include "WinMTRBranding.h"
 export module WinMTR.License;
 #ifdef _DEBUG
 #define new DEBUG_NEW
@@ -384,17 +386,20 @@ Public License instead of this License."};
 export class WinMTRLicense : public CDialog
 {
 public:
-    WinMTRLicense(CWnd* pParent = NULL);
+    explicit WinMTRLicense(CWnd* pParent = nullptr);
 
 
     enum { IDD = IDD_DIALOG_LICENSE };
 
 protected:
-    virtual void DoDataExchange(CDataExchange* pDX);
+    void DoDataExchange(CDataExchange* pDX) override;
 
-    virtual BOOL OnInitDialog();
+    BOOL OnInitDialog() override;
 
     DECLARE_MESSAGE_MAP()
+
+private:
+	CMFCLinkCtrl projectLink;
 };
 
 module : private;
@@ -426,6 +431,7 @@ WinMTRLicense::WinMTRLicense(CWnd* pParent) : CDialog(WinMTRLicense::IDD, pParen
 void WinMTRLicense::DoDataExchange(CDataExchange* pDX)
 {
 	CDialog::DoDataExchange(pDX);
+	DDX_Control(pDX, IDC_LINK_PROJECT, projectLink);
 }
 
 
@@ -437,12 +443,13 @@ void WinMTRLicense::DoDataExchange(CDataExchange* pDX)
 BOOL WinMTRLicense::OnInitDialog() 
 {
 	CDialog::OnInitDialog();
+	projectLink.SetURL(WinMTRBranding::project_url.data());
 	/*
 	m_editLicense.SetSel(-1, -1);
 	m_editLicense.ReplaceSel(LICENCE_TEXT_1);
 	m_editLicense.SetSel(-1, -1);
 	m_editLicense.ReplaceSel(LICENCE_TEXT_2);
 	*/
-	return FALSE;
+	return TRUE;
 }
 

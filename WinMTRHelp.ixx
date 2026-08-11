@@ -28,6 +28,7 @@ module;
 #include <afxwin.h>
 #include <afxdialogex.h>
 #include "resource.h"
+#include "WinMTRBranding.h"
 export module WinMTR.Help;
 
 
@@ -47,11 +48,15 @@ public:
 	enum { IDD = IDD_DIALOG_HELP };
 
 protected:
-	virtual void DoDataExchange(CDataExchange* pDX);    // DDX/DDV support
+	void DoDataExchange(CDataExchange* pDX) override;
+	BOOL OnInitDialog() override;
 
 	DECLARE_MESSAGE_MAP()
 public:
 	afx_msg void OnBnClickedOk();
+
+private:
+	CFont technicalFont;
 };
 
 module : private;
@@ -70,6 +75,25 @@ void WinMTRHelp::DoDataExchange(CDataExchange* pDX)
 BEGIN_MESSAGE_MAP(WinMTRHelp, CDialog)
 	ON_BN_CLICKED(IDOK, &WinMTRHelp::OnBnClickedOk)
 END_MESSAGE_MAP()
+
+BOOL WinMTRHelp::OnInitDialog()
+{
+	CDialog::OnInitDialog();
+	if (technicalFont.CreatePointFont(90, WinMTRBranding::table_font.data())) {
+		constexpr int technicalControlIds[] = {
+			IDC_STATIC_HELP_USAGE_TECH,
+			IDC_STATIC_HELP_INTERVAL_TECH,
+			IDC_STATIC_HELP_SIZE_TECH,
+			IDC_STATIC_HELP_MAXLRU_TECH,
+			IDC_STATIC_HELP_NUMERIC_TECH,
+			IDC_STATIC_HELP_HELP_TECH
+		};
+		for (const int controlId : technicalControlIds) {
+			if (auto* control = GetDlgItem(controlId)) control->SetFont(&technicalFont);
+		}
+	}
+	return TRUE;
+}
 
 
 // WinMTRHelp message handlers

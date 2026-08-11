@@ -44,9 +44,9 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 
 #include "WinMTRGlobal.h"
 #include <locale>
+#include <stdexcept>
 #include "WinMTRMain.h"
 import WinMTR.Help;
-import <winrt/Windows.Foundation.h>;
 import WinMTR.CommandLineParser;
 import WinMTR.Dialog;
 
@@ -89,15 +89,20 @@ WinMTRMain::WinMTRMain()
 //*****************************************************************************
 BOOL WinMTRMain::InitInstance()
 {
-	std::locale::global(std::locale(".UTF8"));
-	struct rt_apartment {
-		rt_apartment() {
-			winrt::init_apartment(winrt::apartment_type::single_threaded);
-		}
-		~rt_apartment() noexcept {
-			winrt::uninit_apartment();
-		}
-	}apartment;
+	try {
+		std::locale::global(std::locale(".UTF8"));
+	}
+	catch (const std::runtime_error&) {
+		// The UI is Unicode regardless of the process locale. Older Windows 7
+		// installations may not expose the UTF-8 locale name, so keep running.
+	}
+
+	INITCOMMONCONTROLSEX commonControls{
+		.dwSize = sizeof(INITCOMMONCONTROLSEX),
+		.dwICC = ICC_WIN95_CLASSES | ICC_LINK_CLASS | ICC_STANDARD_CLASSES
+	};
+	InitCommonControlsEx(&commonControls);
+	AfxInitRichEdit2();
 	
 	/*if (!AfxSocketInit())
 	{
@@ -106,11 +111,6 @@ BOOL WinMTRMain::InitInstance()
 	}*/
 
 	AfxEnableControlContainer();
-	
-#ifdef _AFXDLL
-	Enable3dControls();			// Call this when using MFC in a shared DLL
-#endif
-
 	WinMTRDialog mtrDialog;
 	utils::CWinMTRCommandLineParser cmd_info(mtrDialog);
 	ParseCommandLine(cmd_info);

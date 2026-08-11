@@ -1,158 +1,132 @@
-/*
-WinMTR
-Copyright (C)  2010-2019 Appnor MSP S.A. - http://www.appnor.com
-Copyright (C) 2019-2023 Leetsoftwerx
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; version 2
-of the License.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-*/
-
 module;
-#pragma warning (disable : 4005)
+
+#pragma warning(disable : 4005)
 #include "targetver.h"
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <afx.h>
 #include <afxext.h>
 #include <afxdisp.h>
-#include <ws2tcpip.h>
-#include <ws2ipdef.h>
+#include <WinSock2.h>
+#include <WS2tcpip.h>
 #include "resource.h"
 
 module WinMTR.Dialog:tracing;
 
 import :ClassDef;
-import WinMTRSNetHost;
-import WinMTRDnsUtil;
-import <stop_token>;
-import <optional>;
+import <algorithm>;
 import <mutex>;
-import <format>;
-import <string_view>;
-import <winrt/Windows.Foundation.h>;
+import <optional>;
+import <string>;
+import <vector>;
+import WinMTRDnsUtil;
+import WinMTRIPUtils;
+import WinMTRSNetHost;
 
-using namespace std::literals;
-
-//*****************************************************************************
-// WinMTRDialog::InitMTRNet
-//
-// 
-//*****************************************************************************
 bool WinMTRDialog::InitMTRNet() noexcept
 {
-	CString sHost;
-	m_comboHost.GetWindowTextW(sHost);
-
-	if (sHost.IsEmpty()) [[unlikely]] { // Technically never because this is caught in the calling function
-		sHost = L"localhost";
-	}
-
-	SOCKADDR_INET addrstore{};
-	for (auto af : { AF_INET, AF_INET6 }) {
-		INT addrSize = sizeof(addrstore);
-		if (auto res = WSAStringToAddressW(
-			sHost.GetBuffer()
-			, af
-			, nullptr
-			, reinterpret_cast<LPSOCKADDR>(&addrstore)
-			, &addrSize);
-			!res) {
-			return true;
-		}
-	}
-
-	const auto buf = std::format(L"Resolving host {}..."sv, sHost.GetString());
-	statusBar.SetPaneText(0, buf.c_str());
-	std::unique_ptr<ADDRINFOEXW, addrinfo_deleter> holder;
-	ADDRINFOEXW hint = { .ai_family = AF_UNSPEC };
-	if (const auto result = GetAddrInfoExW(
-		sHost
-		, nullptr
-		, NS_ALL
-		, nullptr
-		, &hint
-		, std::out_ptr(holder)
-		, nullptr
-		, nullptr
-		, nullptr
-		, nullptr); result != ERROR_SUCCESS) {
-		statusBar.SetPaneText(0, CString((LPCTSTR)IDS_STRING_SB_NAME));
-		AfxMessageBox(IDS_STRING_UNABLE_TO_RESOLVE_HOSTNAME);
+	if (!useIPv4.load() && !useIPv6.load()) {
+		AfxMessageBox(IDS_ERROR_SELECT_IP_VERSION, MB_ICONWARNING);
 		return false;
 	}
-
+	CString host;
+	comboHost.GetWindowTextW(host);
+	host.Trim();
+	if (host.IsEmpty()) {
+		AfxMessageBox(IDS_ERROR_NO_HOST, MB_ICONWARNING);
+		comboHost.SetFocus();
+		return false;
+	}
 	return true;
 }
 
-winrt::Windows::Foundation::IAsyncAction WinMTRDialog::pingThread(std::stop_token stop_token, std::wstring sHost)
+void WinMTRDialog::pingThread(std::stop_token stopToken, std::wstring host,
+	std::uint64_t generation) noexcept
 {
-	if (tracing.exchange(true)) {
-		throw new std::runtime_error("Tracing started twice!");
-	}
-	struct tracexit {
-		WinMTRDialog* dialog;
-		~tracexit() noexcept {
-			dialog->tracing.store(false, std::memory_order_release);
-		}
-	}tracexit{ this };
-
-	SOCKADDR_INET addrstore = {};
-
-	for (auto af : { AF_INET, AF_INET6 }) {
-		INT addrSize = sizeof(addrstore);
-		if (auto res = WSAStringToAddressW(
-			sHost.data()
-			, af
-			, nullptr
-			, reinterpret_cast<LPSOCKADDR>(&addrstore)
-			, &addrSize);
-			!res) {
-			co_await this->wmtrnet->DoTrace(stop_token, std::move(addrstore));
-			co_return;
+	std::vector<SOCKADDR_INET> candidates;
+	for (const auto family : { AF_INET, AF_INET6 }) {
+		if ((family == AF_INET && !useIPv4.load()) || (family == AF_INET6 && !useIPv6.load())) continue;
+		SOCKADDR_INET selected{};
+		INT addressSize = sizeof(selected);
+		auto copy = host;
+		if (WSAStringToAddressW(copy.data(), family, nullptr,
+			reinterpret_cast<LPSOCKADDR>(&selected), &addressSize) == 0) {
+			candidates.push_back(selected);
+			break;
 		}
 	}
 
-	int  hintFamily = AF_UNSPEC; //both
-	if (!this->useIPv4) {
-		hintFamily = AF_INET6;
+	if (candidates.empty() && !stopToken.stop_requested()) {
+		int family = AF_UNSPEC;
+		if (!useIPv4.load()) family = AF_INET6;
+		else if (!useIPv6.load()) family = AF_INET;
+		const auto addresses = ResolveAddresses(host, family);
+		// Prefer IPv4 when both are enabled, then transparently fall back to an
+		// IPv6 (or another resolved) address if a complete first path cycle gets
+		// no ICMP response at all.  This tests actual trace usability instead of
+		// trusting resolver order alone.
+		for (const auto preferredFamily : { AF_INET, AF_INET6 }) {
+			for (const auto& address : addresses) {
+				if (address.si_family != preferredFamily
+					|| (preferredFamily == AF_INET && !useIPv4.load())
+					|| (preferredFamily == AF_INET6 && !useIPv6.load())) continue;
+				const bool duplicate = std::any_of(candidates.begin(), candidates.end(),
+					[&](const SOCKADDR_INET& existing) {
+						return same_network_address(existing, address);
+					});
+				if (!duplicate) candidates.push_back(address);
+				if (candidates.size() >= 8) break;
+			}
+			if (candidates.size() >= 8) break;
+		}
 	}
-	else if (!this->useIPv6) {
-		hintFamily = AF_INET;
+
+	if (candidates.empty() || stopToken.stop_requested()) {
+		tracing.store(false, std::memory_order_release);
+		PostMessageW(messageTraceFinished, static_cast<WPARAM>(generation),
+			candidates.empty() ? WSAHOST_NOT_FOUND : ERROR_CANCELLED);
+		return;
 	}
-	timeval timeout{ .tv_sec = 30 };
-	auto result = co_await GetAddrInfoAsync(sHost, &timeout, hintFamily);
-	if (!result || result->empty()) {
-		AfxMessageBox(IDS_STRING_UNABLE_TO_RESOLVE_HOSTNAME);
-		co_return;
+
+	try {
+		if (candidates.size() == 1) {
+			[[maybe_unused]] const auto result = wmtrnet->DoTrace(
+				stopToken, candidates.front(), host, false);
+		}
+		else {
+			std::optional<SOCKADDR_INET> firstUsableCandidate;
+			bool selected = false;
+			for (const auto& candidate : candidates) {
+				if (stopToken.stop_requested()) break;
+				const auto result = wmtrnet->DoTrace(stopToken, candidate, host, true);
+				if (result == WinMTRTraceResult::destination) {
+					selected = true;
+					break;
+				}
+				if (result == WinMTRTraceResult::reply && !firstUsableCandidate) {
+					firstUsableCandidate = candidate;
+				}
+			}
+			if (!selected && !stopToken.stop_requested()) {
+				// Prefer a family that produced any usable ICMP path response.  If
+				// every first-cycle attempt was silent, retain resolver preference.
+				const auto selectedCandidate = firstUsableCandidate.value_or(candidates.front());
+				[[maybe_unused]] const auto result = wmtrnet->DoTrace(
+					stopToken, selectedCandidate, host, false);
+			}
+		}
 	}
-	addrstore = result->front();
-	co_await this->wmtrnet->DoTrace(stop_token, std::move(addrstore));
+	catch (...) {
+		tracing.store(false, std::memory_order_release);
+		PostMessageW(messageTraceFinished, static_cast<WPARAM>(generation), ERROR_GEN_FAILURE);
+		return;
+	}
+	tracing.store(false, std::memory_order_release);
+	PostMessageW(messageTraceFinished, static_cast<WPARAM>(generation), ERROR_SUCCESS);
 }
 
-winrt::fire_and_forget WinMTRDialog::stopTrace()
+void WinMTRDialog::stopTrace() noexcept
 {
-	// grab the thread under a mutex so we don't mess this up and cause a data race
-	decltype(trace_lacky) temp;
-	{
-		std::unique_lock trace_lock{ tracer_mutex };
-		std::swap(temp, trace_lacky);
-	}
-	// don't bother trying call something not there
-	if (!temp) {
-		co_return;
-	}
-	co_await winrt::resume_background();
-	temp.reset(); //trigger the stop token
-	co_return;
+	std::scoped_lock lock(tracerMutex);
+	if (traceThread) traceThread->request_stop();
 }

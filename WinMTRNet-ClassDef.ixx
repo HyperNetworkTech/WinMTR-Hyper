@@ -39,13 +39,37 @@ import <array>;
 import <mutex>;
 import <memory>;
 import <stop_token>;
-import <winrt/base.h>;
-import <winrt/Windows.Foundation.h>;
+import <vector>;
+import <string>;
+import <string_view>;
+import <cstdint>;
+import <unordered_map>;
+import <unordered_set>;
 import WinMTRSNetHost;
 import WinMTROptionsProvider;
+import WinMTRUtils;
 import winmtr.helper;
 
-struct trace_thread;
+export struct WinMTRTraceSnapshot final {
+	std::uint64_t session_id = 0;
+	std::uint64_t data_epoch = 0;
+	std::uint64_t revision = 0;
+	std::wstring target;
+	SOCKADDR_INET target_address = {};
+	ADDRESS_FAMILY address_family = AF_UNSPEC;
+	unsigned start_ttl = WinMTRUtils::DEFAULT_START_TTL;
+	unsigned display_max_ttl = 0;
+	unsigned first_actual_ttl = 0;
+	std::uint64_t first_actual_sent = 0;
+	bool tracing = false;
+	std::vector<s_nethost> hops;
+};
+
+export enum class WinMTRTraceResult {
+	no_reply,
+	reply,
+	destination
+};
 
 //*****************************************************************************
 // CLASS:  WinMTRNet
@@ -63,6 +87,9 @@ public:
 		options(wp),
 		wsaHelper(MAKEWORD(2, 2)),
 		tracing() {
+		for (unsigned index = 0; index < host.size(); ++index) {
+			host[index].hop = index + 1;
+		}
 
 		if (!wsaHelper) [[unlikely]] {
 			//AfxMessageBox(IDP_SOCKETS_INIT_FAILED);
@@ -72,70 +99,85 @@ public:
 	~WinMTRNet() noexcept = default;
 
 
-	[[nodiscard("The task should be awaited")]]
-	winrt::Windows::Foundation::IAsyncAction	DoTrace(std::stop_token stop_token, SOCKADDR_INET address);
+	// Synchronous trace scheduler.  The dialog owns the background std::jthread
+	// and calls this method from that worker, so no Windows Runtime is required.
+	[[nodiscard]] WinMTRTraceResult DoTrace(std::stop_token stop_token, SOCKADDR_INET address,
+		std::wstring target = {}, bool stop_after_unreached_first_round = false);
 
-	void	ResetHops() noexcept
-	{
-		for (auto& h : this->host) {
-			h = s_nethost();
-		}
-	}
+	void ResetHops() noexcept;
 	[[nodiscard]]
-	int		GetMax() const;
+	int GetMax() const;
 
 	[[nodiscard]]
 	std::vector<s_nethost> getCurrentState() const;
+	[[nodiscard]]
+	WinMTRTraceSnapshot getTraceSnapshot() const;
 	s_nethost getStateAt(int at) const
 	{
-		std::unique_lock lock(ghMutex);
+		std::scoped_lock lock(ghMutex);
+		if (at < 0 || static_cast<std::size_t>(at) >= host.size()) {
+			return {};
+		}
 		return host[at];
 	}
+	[[nodiscard]]
+	bool isTracing() const noexcept { return tracing.load(std::memory_order_acquire); }
+	[[nodiscard]]
+	std::uint64_t getSessionId() const noexcept { return session_id.load(std::memory_order_acquire); }
+	[[nodiscard]]
+	std::uint64_t getDataEpoch() const noexcept { return data_epoch.load(std::memory_order_acquire); }
 
-	static constexpr auto MAX_HOPS = 30;
+	// Safe integration point for asynchronous country/ASN/ISP resolvers.
+	// Results from an older session/reset are rejected.
+	bool updateResponderMetadata(std::uint64_t expected_session,
+		std::uint64_t expected_epoch,
+		const SOCKADDR_INET& address,
+		std::wstring name,
+		std::wstring country,
+		std::wstring asn,
+		std::wstring isp);
+
+	static constexpr auto MAX_HOPS = WinMTRUtils::MAX_MAX_HOPS;
 private:
 	std::array<s_nethost, WinMTRNet::MAX_HOPS>	host;
 	SOCKADDR_INET last_remote_addr;
-	mutable std::recursive_mutex	ghMutex;
-	std::optional<winrt::Windows::Foundation::IAsyncAction> tracer;
-	std::optional<winrt::apartment_context> context;
+	std::wstring target_name;
+	mutable std::mutex ghMutex;
 	const IWinMTROptionsProvider* options;
 	winmtr::helper::WSAHelper wsaHelper;
-	std::atomic_bool	tracing;
+	std::atomic_bool tracing = false;
+	std::atomic_uint64_t session_id = 0;
+	std::atomic_uint64_t data_epoch = 0;
+	std::uint64_t reply_sequence = 0;
+	std::uint64_t completed_cycles = 0;
+	std::uint64_t data_revision = 0;
+	unsigned session_start_ttl = WinMTRUtils::DEFAULT_START_TTL;
+	unsigned display_max_ttl = 0;
+	WinMTRTraceOptions session_options;
+	struct responder_metadata final {
+		std::wstring name;
+		std::wstring country;
+		std::wstring asn;
+		std::wstring isp;
+		bool hostname_queried = false;
+		bool network_queried = false;
+	};
+	std::unordered_map<std::wstring, responder_metadata> responder_lookup_cache;
+	std::unordered_set<std::wstring> reverse_dns_inflight;
 
-	[[nodiscard]]
-	SOCKADDR_INET GetAddr(int at) const
-	{
-		std::unique_lock lock(ghMutex);
-		return host[at].addr;
-	}
-	winrt::fire_and_forget	SetAddr(int at, SOCKADDR_INET addr);
-	void	SetName(int at, std::wstring n)
-	{
-		std::unique_lock lock(ghMutex);
-		host[at].name = std::move(n);
-	}
-
-	void addNewReturn(int at, int last)
-	{
-		std::unique_lock lock(ghMutex);
-		host[at].last = last;
-		host[at].total += last;
-		if (host[at].best > last || host[at].xmit == 1) {
-			host[at].best = last;
-		};
-		if (host[at].worst < last) {
-			host[at].worst = last;
-		}
-		host[at].returned++;
-	}
-	void	AddXmit(int at)
-	{
-		std::unique_lock lock(ghMutex);
-		host[at].xmit++;
-	}
-
-	template<class T>
-	[[nodiscard("The task should be awaited")]]
-	winrt::Windows::Foundation::IAsyncAction handleICMP(T remote_addr, std::stop_token stop_token, trace_thread& current);
+	void beginSession(const SOCKADDR_INET& address, std::wstring target,
+		const WinMTRTraceOptions& trace_options);
+	void finishSession(std::uint64_t expected_session) noexcept;
+	void setDisplayMaximum(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	[[nodiscard]] bool replyIsCached(unsigned ttl, std::uint64_t now_tick,
+		unsigned cache_seconds, std::uint64_t expected_epoch,
+		bool& is_destination) const noexcept;
+	void commitTimeout(unsigned ttl, std::uint64_t expected_epoch) noexcept;
+	void commitReply(unsigned ttl, const SOCKADDR_INET& responder, unsigned round_trip_ms,
+		std::uint64_t cycle, std::uint64_t tick, std::uint64_t expected_session,
+		std::uint64_t expected_epoch, bool is_destination, bool resolve_hostname,
+		bool lookup_asn_isp);
+	void scheduleReverseLookup(const SOCKADDR_INET& address,
+		std::uint64_t expected_session, std::uint64_t expected_epoch,
+		bool resolve_hostname, bool lookup_asn_isp);
 };

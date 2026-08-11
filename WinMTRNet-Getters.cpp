@@ -1,22 +1,14 @@
 /*
 WinMTR
 Copyright (C)  2010-2019 Appnor MSP S.A. - http://www.appnor.com
-Copyright (C) 2019-2023 Leetsoftwerx
+Copyright (C) 2019-2026 Leetsoftwerx
 
 This program is free software; you can redistribute it and/or
 modify it under the terms of the GNU General Public License
 as published by the Free Software Foundation; version 2
 of the License.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
+
 module;
 #pragma warning (disable : 4005)
 #include "targetver.h"
@@ -32,48 +24,54 @@ module;
 #include <winsock2.h>
 module WinMTR.Net:Getters;
 
-import <cstring>;
-import <vector>;
-import <iterator>;
+import <algorithm>;
 import <mutex>;
+import <vector>;
 import WinMTRSNetHost;
-import WinMTRIPUtils;
 import :ClassDef;
-
-[[nodiscard]]
-inline bool operator==(const SOCKADDR_INET& lhs, const SOCKADDR_INET& rhs) noexcept {
-	return std::memcmp(&lhs, &rhs, sizeof(SOCKADDR_INET)) == 0;
-}
-
 
 [[nodiscard]]
 std::vector<s_nethost> WinMTRNet::getCurrentState() const
 {
-	std::unique_lock lock(ghMutex);
-	auto max = GetMax();
-	auto end = std::cbegin(host);
-	std::advance(end, max);
-	return std::vector<s_nethost>(std::cbegin(host), end);
+	std::scoped_lock lock(ghMutex);
+	const auto count = std::min<std::size_t>(display_max_ttl, host.size());
+	return std::vector<s_nethost>(host.begin(), host.begin() + count);
+}
+
+[[nodiscard]]
+WinMTRTraceSnapshot WinMTRNet::getTraceSnapshot() const
+{
+	std::scoped_lock lock(ghMutex);
+	WinMTRTraceSnapshot snapshot;
+	snapshot.session_id = session_id.load(std::memory_order_relaxed);
+	snapshot.data_epoch = data_epoch.load(std::memory_order_relaxed);
+	snapshot.revision = data_revision;
+	snapshot.target = target_name;
+	snapshot.target_address = last_remote_addr;
+	snapshot.address_family = last_remote_addr.si_family;
+	snapshot.start_ttl = session_start_ttl;
+	snapshot.display_max_ttl = display_max_ttl;
+	snapshot.tracing = tracing.load(std::memory_order_relaxed);
+
+	if (display_max_ttl < session_start_ttl || display_max_ttl == 0) {
+		return snapshot;
+	}
+	const auto first_index = static_cast<std::size_t>(session_start_ttl - 1);
+	const auto end_index = std::min<std::size_t>(display_max_ttl, host.size());
+	snapshot.hops.assign(host.begin() + first_index, host.begin() + end_index);
+	for (const auto& hop : snapshot.hops) {
+		if (hop.xmit != 0) {
+			snapshot.first_actual_ttl = hop.hop;
+			snapshot.first_actual_sent = hop.xmit;
+			break;
+		}
+	}
+	return snapshot;
 }
 
 [[nodiscard]]
 int WinMTRNet::GetMax() const
 {
-	std::unique_lock lock(ghMutex);
-	int max = MAX_HOPS;
-
-	// first match: traced address responds on ping requests, and the address is in the hosts list
-	for (int i = 1; const auto & h : host) {
-		if (h.addr == last_remote_addr) {
-			max = i;
-			break;
-		}
-		++i;
-	}
-
-	// second match:  traced address doesn't responds on ping requests
-	if (max == MAX_HOPS) {
-		while ((max > 1) && (host[max - 1].addr == host[max - 2].addr && isValidAddress(host[max - 1].addr))) max--;
-	}
-	return max;
+	std::scoped_lock lock(ghMutex);
+	return static_cast<int>(display_max_ttl);
 }

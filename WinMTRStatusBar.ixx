@@ -248,13 +248,17 @@ void WinMTRStatusBar::RepositionControls() noexcept
 	{
 		int   iIndex = CommandToIndex(cntl.nID);
 		HWND hWnd = cntl.hWnd;
-		const auto dpi = GetDpiForWindow(hWnd);
+		UINT dpi = 96;
+		if (HDC dc = ::GetDC(hWnd); dc != nullptr) {
+			dpi = static_cast<UINT>(::GetDeviceCaps(dc, LOGPIXELSX));
+			::ReleaseDC(hWnd, dc);
+		}
 		CRect rcPane;
 		GetItemRect(iIndex, &rcPane);
 
 		// CStatusBar::GetItemRect() sometimes returns invalid size 
 		// of the last pane - we will re-compute it
-		int cx = ::GetSystemMetricsForDpi(SM_CXEDGE, dpi);
+		int cx = MulDiv(::GetSystemMetrics(SM_CXEDGE), static_cast<int>(dpi), 96);
 		DWORD dwPaneStyle = GetPaneStyle(iIndex);
 		if (iIndex == (m_nCount - 1))
 		{
@@ -272,7 +276,7 @@ void WinMTRStatusBar::RepositionControls() noexcept
 				rcPane.right = rcClient.right;
 				if ((GetStyle() & SBARS_SIZEGRIP) == SBARS_SIZEGRIP)
 				{
-					int cxSmIcon = ::GetSystemMetricsForDpi(SM_CXSMICON, dpi);
+					int cxSmIcon = MulDiv(::GetSystemMetrics(SM_CXSMICON), static_cast<int>(dpi), 96);
 					rcPane.right -= cxSmIcon + cx;
 				} // if( (GetStyle() & SBARS_SIZEGRIP) == SBARS_SIZEGRIP )
 			} // else from if( (dwPaneStyle & SBPS_STRETCH ) == 0 )

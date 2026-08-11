@@ -1,8 +1,14 @@
 #pragma once
 
-// Including SDKDDKVer.h defines the highest available Windows platform.
+// Keep the import surface compatible with Windows 7. Newer APIs must be
+// resolved dynamically and must provide a Windows 7 fallback.
+#ifndef WINVER
+#define WINVER 0x0601
+#endif
 
-// If you wish to build your application for a previous Windows platform, include WinSDKVer.h and
-// set the _WIN32_WINNT macro to the platform you wish to support before including SDKDDKVer.h.
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 
+#include <WinSDKVer.h>
 #include <SDKDDKVer.h>

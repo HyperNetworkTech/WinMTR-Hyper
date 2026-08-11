@@ -1,170 +1,216 @@
-/*
-WinMTR
-Copyright (C)  2010-2019 Appnor MSP S.A. - http://www.appnor.com
-Copyright (C) 2019-2023 Leetsoftwerx
-
-This program is free software; you can redistribute it and/or
-modify it under the terms of the GNU General Public License
-as published by the Free Software Foundation; version 2
-of the License.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
-*/
 module;
 #include "targetver.h"
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
+#define NOMINMAX
 #include <afxwin.h>
 #include <afxext.h>
 #include <afxdisp.h>
-//#include <afxdtctl.h>
-
-#ifndef _AFX_NO_AFXCMN_SUPPORT
 #include <afxcmn.h>
-#endif 
-#pragma warning (disable : 4005)
+#include <afxlinkctrl.h>
 #include "resource.h"
+#include "WinMTRBranding.h"
+#include "WinMTRNetworkData.h"
 
 export module WinMTR.Dialog:ClassDef;
 
-import <string>;
-import <winrt/Windows.Foundation.h>;
+import <atomic>;
+import <cstddef>;
+import <cstdint>;
 import <memory>;
 import <mutex>;
 import <optional>;
-import <atomic>;
+import <stop_token>;
+import <string>;
 import <thread>;
+import <vector>;
 import WinMTROptionsProvider;
 import WinMTRStatusBar;
 import WinMTR.Net;
-
-//*****************************************************************************
-// CLASS:  WinMTRDialog
-//
-//
-//*****************************************************************************
+import WinMTRUtils;
 
 export class WinMTRDialog final : public CDialog, public IWinMTROptionsProvider
 {
 public:
-	WinMTRDialog(CWnd* pParent = nullptr) noexcept;
+	explicit WinMTRDialog(CWnd* parent = nullptr) noexcept;
+	~WinMTRDialog() override;
 
 	enum { IDD = IDD_WINMTR_DIALOG };
-	enum class options_source : bool {
-		none,
-		cmd_line
-	};
+	enum class options_source : bool { none, cmd_line };
+	enum class STATES { IDLE = 0, TRACING, STOPPING, EXIT };
 
-	afx_msg BOOL InitRegistry() noexcept;
+	WinMTRStatusBar statusBar;
 
-	WinMTRStatusBar	statusBar;
-
-	enum class STATES {
-		IDLE = 0,
-		TRACING,
-		STOPPING,
-		EXIT
-	};
-
-	enum class STATE_TRANSITIONS {
-		IDLE_TO_IDLE = 0,
-		IDLE_TO_TRACING,
-		IDLE_TO_EXIT,
-		TRACING_TO_TRACING,
-		TRACING_TO_STOPPING,
-		TRACING_TO_EXIT,
-		STOPPING_TO_IDLE,
-		STOPPING_TO_STOPPING,
-		STOPPING_TO_EXIT
-	};
-
-
-
+	BOOL InitRegistry() noexcept;
 	bool InitMTRNet() noexcept;
-
 	int DisplayRedraw();
-	void Transit(STATES new_state);
-
-private:
-	CButton	m_buttonOptions;
-	CButton	m_buttonExit;
-	CButton	m_buttonStart;
-	CComboBox m_comboHost;
-	CListCtrl	m_listMTR;
-
-	CStatic	m_staticS;
-	CStatic	m_staticJ;
-
-	CButton	m_buttonExpT;
-	CButton	m_buttonExpH;
-	std::wstring msz_defaulthostname;
-	std::shared_ptr<WinMTRNet>			wmtrnet;
-	std::mutex tracer_mutex;
-	std::optional<std::jthread> trace_lacky;
-	HICON m_hIcon;
-	std::atomic<double>				interval;
-	STATES				state;
-	STATE_TRANSITIONS	transition;
-	std::atomic_uint	pingsize;
-	int					maxLRU;
-	int					nrLRU = 0;
-	bool				m_autostart = false;
-	bool				hasPingsizeFromCmdLine = false;
-	bool				hasMaxLRUFromCmdLine = false;
-	bool				hasIntervalFromCmdLine = false;
-	std::atomic_bool				useDNS;
-	bool				hasUseDNSFromCmdLine = false;
-	bool				useIPv4 = true;
-	bool				useIPv6 = true;
-	std::atomic_bool	tracing;
-
-	void ClearHistory();
-	winrt::Windows::Foundation::IAsyncAction pingThread(std::stop_token token, std::wstring shost);
-	winrt::fire_and_forget stopTrace();
-public:
+	void Transit(STATES newState);
 
 	void SetHostName(std::wstring host);
-	void SetInterval(float i, options_source fromCmdLine = options_source::none) noexcept;
-	void SetPingSize(unsigned ps, options_source fromCmdLine = options_source::none) noexcept;
-	void SetMaxLRU(int mlru, options_source fromCmdLine = options_source::none) noexcept;
-	void SetUseDNS(bool udns, options_source fromCmdLine = options_source::none) noexcept;
+	void SetInterval(float value, options_source source = options_source::none) noexcept;
+	void SetPingSize(unsigned value, options_source source = options_source::none) noexcept;
+	void SetMaxLRU(int value, options_source source = options_source::none) noexcept;
+	void SetUseDNS(bool value, options_source source = options_source::none) noexcept;
 
-	inline double getInterval() const noexcept { return interval; }
-	inline unsigned getPingSize() const noexcept { return pingsize; }
-	inline bool getUseDNS() const noexcept { return useDNS; }
+	[[nodiscard]] double getInterval() const noexcept override { return interval.load(); }
+	[[nodiscard]] unsigned getPingSize() const noexcept override { return packetSize.load(); }
+	[[nodiscard]] bool getUseDNS() const noexcept override { return resolveNames.load(); }
+	[[nodiscard]] unsigned getMaxHops() const noexcept override { return maxHops.load(); }
+	[[nodiscard]] unsigned getTimeoutMs() const noexcept override { return timeoutMs.load(); }
+	[[nodiscard]] unsigned getCycles() const noexcept override { return cycles.load(); }
+	[[nodiscard]] unsigned getTos() const noexcept override { return tos.load(); }
+	[[nodiscard]] int getPayloadPattern() const noexcept override { return payloadPattern.load(); }
+	[[nodiscard]] unsigned getStartTtl() const noexcept override { return startTtl.load(); }
+	[[nodiscard]] unsigned getMinimumTtl() const noexcept override { return minimumTtl.load(); }
+	[[nodiscard]] unsigned getUnknownHostLimit() const noexcept override { return unknownHostLimit.load(); }
+	[[nodiscard]] unsigned getEcmpDisplayLimit() const noexcept override { return ecmpDisplayLimit.load(); }
+	[[nodiscard]] unsigned getReplyCacheSeconds() const noexcept override { return replyCacheSeconds.load(); }
+	[[nodiscard]] bool getDontFragment() const noexcept override { return dontFragment.load(); }
+	[[nodiscard]] bool getLookupAsnIsp() const noexcept override { return lookupAsnIsp.load(); }
+	[[nodiscard]] bool getUseIPv4() const noexcept override { return useIPv4.load(); }
+	[[nodiscard]] bool getUseIPv6() const noexcept override { return useIPv6.load(); }
+	[[nodiscard]] bool getQueryPublicNetworkInfo() const noexcept override { return queryPublicInfo.load(); }
 
 protected:
-	void DoDataExchange(CDataExchange* pDX) override;
-
+	void DoDataExchange(CDataExchange* dataExchange) override;
 	BOOL OnInitDialog() override;
+	void OnCancel() override;
+	BOOL OnNotify(WPARAM wParam, LPARAM lParam, LRESULT* result) override;
+
+private:
+	static constexpr UINT_PTR dialogTimerId = 1;
+	static constexpr UINT dialogTimerMs = 100;
+	static constexpr UINT messageTraceFinished = WM_APP + 20;
+	static constexpr UINT messageNetworkInfoReady = WM_APP + 21;
+
+	enum class DisplayRowKind { primary, responder, unknown_range };
+	struct DisplayRow final {
+		DisplayRowKind kind = DisplayRowKind::primary;
+		unsigned firstHop = 0;
+		unsigned lastHop = 0;
+		size_t responderIndex = 0;
+		std::wstring responderAddress;
+	};
+
+	CButton buttonOptions;
+	CButton buttonStart;
+	CButton buttonReset;
+	CButton buttonScreenshot;
+	CButton buttonCopyExport;
+	CButton buttonNetworkDetails;
+	CComboBox comboHost;
+	CListCtrl listMtr;
+	CStatic groupTarget;
+	CStatic groupActions;
+	CStatic groupPublicInfo;
+	CMFCLinkCtrl companyLink;
+	CFont tableFont;
+	CFont technicalFont;
+	std::vector<DisplayRow> displayRows;
+	bool listIsVisible = false;
+	bool firstDataResize = true;
+	std::size_t lastAutoRowCount = 0;
+	int topContentBottom = 0;
+
+	std::wstring defaultHostname;
+	std::wstring currentTarget;
+	std::shared_ptr<WinMTRNet> wmtrnet;
+	std::mutex tracerMutex;
+	std::optional<std::jthread> traceThread;
+	std::atomic_bool tracing = false;
+	std::atomic_uint64_t traceGeneration = 0;
+	std::uint64_t lastRenderedRevision = ~std::uint64_t{};
+	STATES state = STATES::IDLE;
+	HICON icon = nullptr;
+
+	std::atomic<double> interval;
+	std::atomic_uint packetSize;
+	std::atomic_uint maxHops;
+	std::atomic_uint timeoutMs;
+	std::atomic_uint cycles;
+	std::atomic_uint tos;
+	std::atomic_int payloadPattern;
+	std::atomic_uint startTtl;
+	std::atomic_uint minimumTtl;
+	std::atomic_uint unknownHostLimit;
+	std::atomic_uint ecmpDisplayLimit;
+	std::atomic_uint replyCacheSeconds;
+	std::atomic_bool resolveNames;
+	std::atomic_bool lookupAsnIsp;
+	std::atomic_bool dontFragment;
+	std::atomic_bool useIPv4;
+	std::atomic_bool useIPv6;
+	std::atomic_bool queryPublicInfo;
+	unsigned historyLimit;
+	unsigned persistentHistoryLimit = WinMTRUtils::DEFAULT_MAX_LRU;
+	std::vector<std::wstring> sessionHistory;
+	int historyCount = 0;
+	bool autoStart = false;
+	bool hasPacketSizeFromCommandLine = false;
+	bool hasHistoryLimitFromCommandLine = false;
+	bool hasIntervalFromCommandLine = false;
+	bool hasResolveNamesFromCommandLine = false;
+
+	std::mutex networkInfoMutex;
+	winmtr::network_data::CurrentNetworkInfo networkInfo;
+	std::optional<std::jthread> networkInfoThread;
+	std::atomic_uint64_t networkInfoGeneration = 0;
+	std::atomic_bool networkInfoRunning = false;
+	std::atomic_bool networkInfoRestartPending = false;
+
+	void pingThread(std::stop_token stopToken, std::wstring host,
+		std::uint64_t generation) noexcept;
+	void stopTrace() noexcept;
+	void startNetworkInfoQuery();
+	void stopNetworkInfoQuery() noexcept;
+	void updateNetworkInfoSummary();
+	void showNetworkInfoDialog();
+	void setStatus(const wchar_t* text);
+	void ClearHistory();
+	void SaveSettings() noexcept;
+	void AddHostToHistory(const std::wstring& host);
+	void configureList();
+	void applyTechnicalFonts(UINT dpi);
+	void adjustWindowForRows();
+	[[nodiscard]] CSize minimumWindowSize();
+	void layoutControls(int clientWidth, int clientHeight);
+	void showNodeDetails(const DisplayRow& row);
+	[[nodiscard]] bool confirmShare() const;
+	void showCopyExportMenu();
+	void copyText();
+	void copyHtml();
+	void exportText();
+	void exportHtml();
+	void exportCsv();
+	void exportJson();
+	void screenshotToClipboard();
+
 	afx_msg void OnPaint();
-	afx_msg void OnSize(UINT, int, int);
-	afx_msg void OnSizing(UINT, LPRECT);
+	afx_msg void OnSize(UINT type, int width, int height);
+	afx_msg void OnSizing(UINT side, LPRECT rect);
+	afx_msg void OnGetMinMaxInfo(MINMAXINFO* info);
+	afx_msg LRESULT OnDpiChanged(WPARAM newDpi, LPARAM suggestedRect);
 	afx_msg HCURSOR OnQueryDragIcon();
 	afx_msg void OnRestart() noexcept;
 	afx_msg void OnOptions();
-	void OnCancel() override;
-
-	afx_msg void OnCTTC() noexcept;
-	afx_msg void OnCHTC() noexcept;
-	afx_msg void OnEXPT() noexcept;
-	afx_msg void OnEXPH() noexcept;
-
-	afx_msg void OnDblclkList(NMHDR* pNMHDR, LRESULT* pResult);
-
-	DECLARE_MESSAGE_MAP()
-public:
+	afx_msg void OnResetStatistics();
+	afx_msg void OnScreenshot();
+	afx_msg void OnCopyExport();
+	afx_msg void OnNetworkDetails();
+	afx_msg void OnExportCopyText();
+	afx_msg void OnExportCopyHtml();
+	afx_msg void OnExportSaveText();
+	afx_msg void OnExportSaveHtml();
+	afx_msg void OnExportSaveCsv();
+	afx_msg void OnExportSaveJson();
+	afx_msg void OnDblclkList(NMHDR* header, LRESULT* result);
 	afx_msg void OnCbnSelchangeComboHost();
 	afx_msg void OnCbnSelendokComboHost();
 	afx_msg void OnCbnCloseupComboHost();
-	afx_msg void OnTimer(UINT_PTR nIDEvent) noexcept;
+	afx_msg void OnTimer(UINT_PTR timerId) noexcept;
 	afx_msg void OnClose();
-	afx_msg void OnBnClickedCancel();
+	afx_msg LRESULT OnTraceFinished(WPARAM result, LPARAM errorCode);
+	afx_msg LRESULT OnNetworkInfoReady(WPARAM generation, LPARAM unused);
+
+	DECLARE_MESSAGE_MAP()
 };

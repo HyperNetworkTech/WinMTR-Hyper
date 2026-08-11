@@ -26,6 +26,12 @@ module;
 
 #include <afxwin.h>
 #include <afxext.h>
+#include <cerrno>
+#include <cmath>
+#include <cstdlib>
+#include <cwchar>
+#include <string>
+#include "WinMTRBranding.h"
 
 export module WinMTR.CommandLineParser;
 
@@ -33,23 +39,29 @@ import WinMTR.Dialog;
 
 export namespace utils {
 
-	class CWinMTRCommandLineParser final :
-		public CCommandLineInfo
+	class CWinMTRCommandLineParser final : public CCommandLineInfo
 	{
 	public:
-		CWinMTRCommandLineParser(WinMTRDialog& dlg) noexcept
-			:dlg(dlg) {}
-	private:
+		explicit CWinMTRCommandLineParser(WinMTRDialog& dlg) noexcept
+			: dlg(dlg)
+		{
+		}
 
-		void ParseParam(const WCHAR* pszParam, BOOL bFlag, [[maybe_unused]] BOOL bLast) noexcept override final;
+		[[nodiscard]] bool isAskingForHelp() const noexcept
+		{
+			return m_help;
+		}
+
+	private:
+		void ParseParam(const WCHAR* pszParam, BOOL bFlag, BOOL bLast) noexcept override final;
 #ifdef _UNICODE
-		void ParseParam([[maybe_unused]] const char* pszParam, [[maybe_unused]] BOOL bFlag, [[maybe_unused]] BOOL bLast) noexcept override final
+		void ParseParam(
+			[[maybe_unused]] const char* pszParam,
+			[[maybe_unused]] BOOL bFlag,
+			[[maybe_unused]] BOOL bLast) noexcept override final
 		{
 		}
 #endif
-	private:
-
-		WinMTRDialog& dlg;
 
 		enum class expect_next {
 			none,
@@ -57,76 +69,244 @@ export namespace utils {
 			ping_size,
 			lru
 		};
+
+		void ReportError(const wchar_t* prefix, const wchar_t* detail = nullptr) noexcept;
+		void ReportInvalidValue(const wchar_t* option, const wchar_t* value) noexcept;
+		[[nodiscard]] const wchar_t* PendingOptionName() const noexcept;
+
+		WinMTRDialog& dlg;
 		expect_next next = expect_next::none;
 		bool m_help = false;
-
-	public:
-		bool isAskingForHelp() const noexcept {
-			return m_help;
-		}
-		
+		bool m_has_target = false;
 	};
 }
 
 
 module : private;
 
-import <string_view>;
 import WinMTRUtils;
 
+namespace {
+	[[nodiscard]] bool IsOption(
+		const wchar_t* value,
+		const wchar_t* short_name,
+		const wchar_t* long_name) noexcept
+	{
+		if (_wcsicmp(value, short_name) == 0 || _wcsicmp(value, long_name) == 0) {
+			return true;
+		}
 
-void utils::CWinMTRCommandLineParser::ParseParam(const WCHAR* pszParam, BOOL bFlag, [[maybe_unused]] BOOL bLast) noexcept
+		// MFC removes one leading '-' or '/'. Consequently, --long reaches
+		// ParseParam as -long, while -long and /long arrive as long.
+		return value[0] == L'-' && _wcsicmp(value + 1, long_name) == 0;
+	}
+
+	[[nodiscard]] bool ParseInteger(const wchar_t* text, long& value) noexcept
+	{
+		errno = 0;
+		wchar_t* end = nullptr;
+		const auto parsed = std::wcstol(text, &end, 10);
+		if (text == end || end == nullptr || *end != L'\0' || errno == ERANGE) {
+			return false;
+		}
+
+		value = parsed;
+		return true;
+	}
+
+	[[nodiscard]] bool ParseFloatingPoint(const wchar_t* text, double& value) noexcept
+	{
+		errno = 0;
+		wchar_t* end = nullptr;
+		const auto parsed = std::wcstod(text, &end);
+		if (text == end || end == nullptr || *end != L'\0' || errno == ERANGE ||
+			!std::isfinite(parsed)) {
+			return false;
+		}
+
+		value = parsed;
+		return true;
+	}
+}
+
+void utils::CWinMTRCommandLineParser::ReportError(
+	const wchar_t* prefix,
+	const wchar_t* detail) noexcept
 {
-	using namespace std::literals;
+	try {
+		std::wstring message(prefix);
+		if (detail != nullptr) {
+			message.append(detail);
+		}
+		AfxMessageBox(message.c_str(), MB_OK | MB_ICONERROR);
+	}
+	catch (...) {
+		AfxMessageBox(
+			WinMTRBranding::cli_strings::generic_error.data(),
+			MB_OK | MB_ICONERROR);
+	}
+
+	// WinMTRMain already displays the help dialog and exits when this flag is
+	// set, so parse failures follow the same safe path after the Chinese error.
+	m_help = true;
+}
+
+void utils::CWinMTRCommandLineParser::ReportInvalidValue(
+	const wchar_t* option,
+	const wchar_t* value) noexcept
+{
+	try {
+		std::wstring detail(option);
+		detail.append(L" = ");
+		detail.append(value);
+		ReportError(
+			WinMTRBranding::cli_strings::invalid_value.data(),
+			detail.c_str());
+	}
+	catch (...) {
+		ReportError(WinMTRBranding::cli_strings::generic_error.data());
+	}
+}
+
+const wchar_t* utils::CWinMTRCommandLineParser::PendingOptionName() const noexcept
+{
+	switch (next) {
+	case expect_next::interval:
+		return L"--interval / -i";
+	case expect_next::ping_size:
+		return L"--size / -s";
+	case expect_next::lru:
+		return L"--maxLRU / -m";
+	case expect_next::none:
+	default:
+		return L"";
+	}
+}
+
+void utils::CWinMTRCommandLineParser::ParseParam(
+	const WCHAR* pszParam,
+	BOOL bFlag,
+	BOOL bLast) noexcept
+{
+	if (pszParam == nullptr) {
+		ReportError(WinMTRBranding::cli_strings::generic_error.data());
+		return;
+	}
+
 	if (bFlag) {
-		if (L"h"sv == pszParam || L"-help"sv == pszParam) {
-			this->m_help = true;
+		if (next != expect_next::none) {
+			ReportError(
+				WinMTRBranding::cli_strings::missing_value.data(),
+				PendingOptionName());
+			next = expect_next::none;
 		}
-		else if (L"n"sv == pszParam || L"-numeric"sv == pszParam) {
-			this->dlg.SetUseDNS(false, WinMTRDialog::options_source::cmd_line);
+
+		if (IsOption(pszParam, L"h", L"help")) {
+			m_help = true;
+			return;
 		}
-		else if (L"i"sv == pszParam || L"-interval"sv == pszParam) {
-			this->next = expect_next::interval;
+		if (IsOption(pszParam, L"n", L"numeric")) {
+			dlg.SetUseDNS(false, WinMTRDialog::options_source::cmd_line);
+			return;
 		}
-		else if (L"m"sv == pszParam || L"-maxLRU"sv == pszParam) {
-			this->next = expect_next::lru;
+		if (IsOption(pszParam, L"i", L"interval")) {
+			next = expect_next::interval;
 		}
-		else if (L"s"sv == pszParam || L"-size"sv == pszParam) {
-			this->next = expect_next::ping_size;
+		else if (IsOption(pszParam, L"m", L"maxLRU")) {
+			next = expect_next::lru;
+		}
+		else if (IsOption(pszParam, L"s", L"size")) {
+			next = expect_next::ping_size;
+		}
+		else {
+			try {
+				std::wstring shown_option(L"-");
+				shown_option.append(pszParam);
+				ReportError(
+					WinMTRBranding::cli_strings::unknown_option.data(),
+					shown_option.c_str());
+			}
+			catch (...) {
+				ReportError(WinMTRBranding::cli_strings::generic_error.data());
+			}
+			return;
+		}
+
+		if (bLast) {
+			ReportError(
+				WinMTRBranding::cli_strings::missing_value.data(),
+				PendingOptionName());
+			next = expect_next::none;
 		}
 		return;
 	}
-	wchar_t* end = nullptr;
-	switch (this->next) {
+
+	if (next == expect_next::none) {
+		if (*pszParam == L'\0') {
+			ReportError(WinMTRBranding::cli_strings::empty_target.data());
+			return;
+		}
+		if (m_has_target) {
+			ReportError(WinMTRBranding::cli_strings::multiple_targets.data());
+			return;
+		}
+
+		// CWinApp::ParseCommandLine supplies the Unicode token after Windows has
+		// processed quoting, so spaces and non-ASCII host names remain intact.
+		dlg.SetHostName(std::wstring(pszParam));
+		m_has_target = true;
+		return;
+	}
+
+	const auto pending = next;
+	const auto option_name = PendingOptionName();
+	next = expect_next::none;
+
+	switch (pending) {
 	case expect_next::lru:
 	{
-		auto parsed = std::wcstol(pszParam, &end, 10);
-		if (parsed < WinMTRUtils::MIN_MAX_LRU || parsed > WinMTRUtils::MAX_MAX_LRU) {
-			parsed = WinMTRUtils::DEFAULT_MAX_LRU;
+		long parsed = 0;
+		if (!ParseInteger(pszParam, parsed) ||
+			parsed < static_cast<long>(WinMTRUtils::MIN_MAX_LRU) ||
+			parsed > static_cast<long>(WinMTRUtils::MAX_MAX_LRU)) {
+			ReportInvalidValue(option_name, pszParam);
+			return;
 		}
-		this->dlg.SetMaxLRU(parsed, WinMTRDialog::options_source::cmd_line);
+		dlg.SetMaxLRU(
+			static_cast<int>(parsed),
+			WinMTRDialog::options_source::cmd_line);
+		break;
 	}
-	break;
 	case expect_next::interval:
 	{
-		auto parsed = std::wcstof(pszParam, &end);
-		if (parsed > WinMTRUtils::MAX_INTERVAL || parsed < WinMTRUtils::MIN_INTERVAL) {
-			parsed = WinMTRUtils::DEFAULT_INTERVAL;
+		double parsed = 0.0;
+		if (!ParseFloatingPoint(pszParam, parsed) ||
+			parsed < WinMTRUtils::MIN_INTERVAL ||
+			parsed > WinMTRUtils::MAX_INTERVAL) {
+			ReportInvalidValue(option_name, pszParam);
+			return;
 		}
-		this->dlg.SetInterval(parsed, WinMTRDialog::options_source::cmd_line);
+		dlg.SetInterval(
+			static_cast<float>(parsed),
+			WinMTRDialog::options_source::cmd_line);
+		break;
 	}
-	break;
 	case expect_next::ping_size:
 	{
-		auto parsed = std::wcstol(pszParam, &end, 10);
-		if (parsed > WinMTRUtils::MAX_PING_SIZE || parsed < WinMTRUtils::MIN_PING_SIZE) {
-			parsed = WinMTRUtils::DEFAULT_PING_SIZE;
+		long parsed = 0;
+		if (!ParseInteger(pszParam, parsed) ||
+			parsed < static_cast<long>(WinMTRUtils::MIN_PING_SIZE) ||
+			parsed > static_cast<long>(WinMTRUtils::MAX_PING_SIZE)) {
+			ReportInvalidValue(option_name, pszParam);
+			return;
 		}
-		this->dlg.SetPingSize(parsed, WinMTRDialog::options_source::cmd_line);
+		dlg.SetPingSize(
+			static_cast<unsigned>(parsed),
+			WinMTRDialog::options_source::cmd_line);
+		break;
 	}
-	break;
+	case expect_next::none:
 	default:
 		break;
 	}
-	this->next = expect_next::none;
 }
