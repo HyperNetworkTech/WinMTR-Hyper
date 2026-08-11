@@ -14,6 +14,7 @@ module WinMTR.Dialog:StateMachine;
 import :ClassDef;
 import <mutex>;
 import <string>;
+import WinMTRUtils;
 
 namespace {
 [[nodiscard]] CString localized(UINT id)
@@ -110,6 +111,18 @@ void WinMTRDialog::OnTimer(UINT_PTR timerId) noexcept
 			if (state == STATES::EXIT) CDialog::OnOK();
 			else if (state == STATES::TRACING || state == STATES::STOPPING) Transit(STATES::IDLE);
 		}
+		if (queryPublicInfo.load()
+			&& publicInfoRefreshMode.load() == WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL
+			&& !networkInfoRunning.load()) {
+			const std::uint64_t now = GetTickCount64();
+			const std::uint64_t intervalMilliseconds =
+				static_cast<std::uint64_t>(publicInfoRefreshMinutes.load()) * 60'000u;
+			if (lastNetworkInfoQueryTick == 0
+				|| now < lastNetworkInfoQueryTick
+				|| now - lastNetworkInfoQueryTick >= intervalMilliseconds) {
+				startNetworkInfoQuery();
+			}
+		}
 	}
 	CDialog::OnTimer(timerId);
 }
@@ -130,6 +143,28 @@ LRESULT WinMTRDialog::OnTraceFinished(WPARAM generation, LPARAM errorCode)
 	else if (state == STATES::TRACING || state == STATES::STOPPING) {
 		Transit(STATES::IDLE);
 	}
+	return 0;
+}
+
+LRESULT WinMTRDialog::OnTraceDataChanged(WPARAM, LPARAM)
+{
+	DisplayRedraw();
+	return 0;
+}
+
+LRESULT WinMTRDialog::OnNetworkInterfaceChanged(WPARAM, LPARAM)
+{
+	if (!queryPublicInfo.load()
+		|| publicInfoRefreshMode.load() != WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE
+		|| state == STATES::EXIT) return 0;
+
+	constexpr std::uint64_t debounceMilliseconds = 5'000u;
+	const std::uint64_t now = GetTickCount64();
+	if (lastNetworkChangeRefreshTick != 0
+		&& now >= lastNetworkChangeRefreshTick
+		&& now - lastNetworkChangeRefreshTick < debounceMilliseconds) return 0;
+	lastNetworkChangeRefreshTick = now;
+	startNetworkInfoQuery();
 	return 0;
 }
 

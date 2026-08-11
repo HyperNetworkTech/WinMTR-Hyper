@@ -88,6 +88,8 @@ struct pending_probe final {
 	DWORD issue_error = ERROR_SUCCESS;
 	std::uint64_t completed_tick = 0;
 	bool issued = false;
+	bool usable_reply = false;
+	bool destination_reply = false;
 };
 
 struct parsed_reply final {
@@ -404,8 +406,24 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 			for (auto& probe : probes) {
 				auto* pending = &probe;
 				const HANDLE handle = icmp_handles[probe.ttl - 1].get();
-				workers.emplace_back([pending, handle, &address, &trace_options, &payload] {
+				workers.emplace_back([this, pending, handle, &address, &trace_options, &payload,
+					cycle_serial, this_session, round_epoch] {
 					issue_probe(*pending, handle, address, trace_options, payload);
+					if (!pending->issued) return;
+					const auto parsed = parse_reply(*pending, address.si_family);
+					if (is_usable_trace_reply(parsed.status) && isValidAddress(parsed.address)) {
+						pending->usable_reply = true;
+						pending->destination_reply = parsed.status == IP_SUCCESS
+							&& same_network_address(parsed.address, address);
+						commitReply(pending->ttl, parsed.address, parsed.round_trip_ms, cycle_serial,
+							pending->completed_tick, this_session, round_epoch,
+							pending->destination_reply, trace_options.resolve_hostnames,
+							trace_options.lookup_asn_isp);
+					}
+					else {
+						commitTimeout(pending->ttl, round_epoch);
+					}
+					if (options != nullptr) options->notifyTraceDataChanged();
 				});
 			}
 			// jthread destruction drains the complete batch. Pending probes are not
@@ -414,20 +432,11 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 		for (const auto& probe : probes) {
 			if (!probe.issued) continue;
 			round_had_completed_probe = true;
-			const auto parsed = parse_reply(probe, address.si_family);
-			if (is_usable_trace_reply(parsed.status) && isValidAddress(parsed.address)) {
-				const bool is_destination = parsed.status == IP_SUCCESS
-					&& same_network_address(parsed.address, address);
-				commitReply(probe.ttl, parsed.address, parsed.round_trip_ms, cycle_serial,
-					probe.completed_tick, this_session, round_epoch, is_destination,
-					trace_options.resolve_hostnames, trace_options.lookup_asn_isp);
+			if (probe.usable_reply) {
 				round_responded[probe.ttl - 1] = true;
-				round_destination[probe.ttl - 1] = is_destination;
+				round_destination[probe.ttl - 1] = probe.destination_reply;
 				session_had_usable_reply = true;
-				session_reached_destination = session_reached_destination || is_destination;
-			}
-			else {
-				commitTimeout(probe.ttl, round_epoch);
+				session_reached_destination = session_reached_destination || probe.destination_reply;
 			}
 		}
 
@@ -609,8 +618,17 @@ void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 		if (is_destination) hop.last_destination_reply_tick = tick;
 		auto& observed = hop.observeResponder(responder, ++reply_sequence, tick);
 		const auto address_key = addr_to_string(responder);
-		if (const auto cached = responder_lookup_cache.find(address_key);
-			cached != responder_lookup_cache.end()) {
+		auto cached = responder_lookup_cache.find(address_key);
+		const auto now = GetTickCount64();
+		const auto cacheLifetime = static_cast<std::uint64_t>(
+			WinMTRUtils::RESPONDER_METADATA_CACHE_SECONDS) * 1000ull;
+		if (cached != responder_lookup_cache.end()
+			&& (cached->second.cached_at_tick == 0 || now < cached->second.cached_at_tick
+				|| now - cached->second.cached_at_tick > cacheLifetime)) {
+			responder_lookup_cache.erase(cached);
+			cached = responder_lookup_cache.end();
+		}
+		if (cached != responder_lookup_cache.end()) {
 			const std::wstring displayed_name = resolve_hostname ? cached->second.name : L"";
 			const std::wstring displayed_country = lookup_asn_isp ? cached->second.country : L"";
 			const std::wstring displayed_asn = lookup_asn_isp ? cached->second.asn : L"";
@@ -649,8 +667,17 @@ void WinMTRNet::scheduleReverseLookup(const SOCKADDR_INET& address,
 			|| data_epoch.load(std::memory_order_relaxed) != expected_epoch) {
 			return;
 		}
-		if (const auto cached = responder_lookup_cache.find(address_key);
-			cached != responder_lookup_cache.end()) {
+		auto cached = responder_lookup_cache.find(address_key);
+		const auto now = GetTickCount64();
+		const auto cacheLifetime = static_cast<std::uint64_t>(
+			WinMTRUtils::RESPONDER_METADATA_CACHE_SECONDS) * 1000ull;
+		if (cached != responder_lookup_cache.end()
+			&& (cached->second.cached_at_tick == 0 || now < cached->second.cached_at_tick
+				|| now - cached->second.cached_at_tick > cacheLifetime)) {
+			responder_lookup_cache.erase(cached);
+			cached = responder_lookup_cache.end();
+		}
+		if (cached != responder_lookup_cache.end()) {
 			const std::wstring displayed_name = resolve_hostname ? cached->second.name : L"";
 			const std::wstring displayed_country = lookup_asn_isp ? cached->second.country : L"";
 			const std::wstring displayed_asn = lookup_asn_isp ? cached->second.asn : L"";
@@ -681,6 +708,7 @@ void WinMTRNet::scheduleReverseLookup(const SOCKADDR_INET& address,
 		responder_metadata metadata;
 		metadata.hostname_queried = resolve_hostname;
 		metadata.network_queried = lookup_asn_isp;
+		metadata.cached_at_tick = GetTickCount64();
 		if (lookup_asn_isp && winmtr::network_data::isPublicAddress(address_key)) {
 			const auto network_data = winmtr::network_data::queryAddress(address_key, {}, resolve_hostname);
 			metadata.country = network_data.country;
@@ -714,6 +742,17 @@ void WinMTRNet::scheduleReverseLookup(const SOCKADDR_INET& address,
 			if (metadata.isp.empty()) metadata.isp = previous->second.isp;
 			metadata.hostname_queried = metadata.hostname_queried || previous->second.hostname_queried;
 			metadata.network_queried = metadata.network_queried || previous->second.network_queried;
+		}
+		if (!self->responder_lookup_cache.contains(address_key)
+			&& self->responder_lookup_cache.size()
+				>= WinMTRUtils::MAX_RESPONDER_METADATA_CACHE_ENTRIES) {
+			const auto oldest = std::min_element(self->responder_lookup_cache.begin(),
+				self->responder_lookup_cache.end(), [](const auto& lhs, const auto& rhs) {
+					return lhs.second.cached_at_tick < rhs.second.cached_at_tick;
+				});
+			if (oldest != self->responder_lookup_cache.end()) {
+				self->responder_lookup_cache.erase(oldest);
+			}
 		}
 		self->responder_lookup_cache[address_key] = metadata;
 		if (metadata.name.empty() && metadata.country.empty()

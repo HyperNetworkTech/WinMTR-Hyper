@@ -14,6 +14,7 @@ module;
 #include "WinMTRProperties.h"
 #include "WinMTRBranding.h"
 #include "WinMTRNetworkData.h"
+#pragma comment(lib, "iphlpapi.lib")
 
 module WinMTR.Dialog:display;
 
@@ -116,13 +117,23 @@ void moveControl(CWnd* parent, int id, int x, int y, int width, int height)
 	return width;
 }
 
+[[nodiscard]] int publicLabelWidth(CWnd* parent, int id)
+{
+	return controlTextWidth(parent, id) + scaled(parent->GetSafeHwnd(), 4);
+}
+
 [[nodiscard]] int naturalPublicInformationWidth(CWnd* parent)
 {
 	const HWND window = parent->GetSafeHwnd();
 	const int gap = scaled(window, 8);
-	const int padding = scaled(window, 12);
+	const int padding = scaled(window, 8);
+	const std::array<int, 4> row1LabelIds{
+		IDC_STATIC_PUBLIC_IP_LABEL, IDC_STATIC_PUBLIC_COUNTRY_LABEL,
+		IDC_STATIC_PUBLIC_CITY_LABEL, IDC_STATIC_PUBLIC_ASN_LABEL
+	};
 	const std::array<int, 4> row1Labels{
-		scaled(window, 30), scaled(window, 52), scaled(window, 52), scaled(window, 46)
+		publicLabelWidth(parent, row1LabelIds[0]), publicLabelWidth(parent, row1LabelIds[1]),
+		publicLabelWidth(parent, row1LabelIds[2]), publicLabelWidth(parent, row1LabelIds[3])
 	};
 	const std::array<int, 4> row1Ids{
 		IDC_STATIC_PUBLIC_IP, IDC_STATIC_PUBLIC_COUNTRY,
@@ -136,9 +147,11 @@ void moveControl(CWnd* parent, int id, int x, int y, int width, int height)
 		row1 += row1Labels[index] + std::max(row1MinimumValues[index],
 			controlTextWidth(parent, row1Ids[index]) + padding);
 	}
-	const int row2 = scaled(window, 84) + std::max(scaled(window, 40),
+	const int hostnameLabelWidth = publicLabelWidth(parent, IDC_STATIC_PUBLIC_HOSTNAME_LABEL);
+	const int ispLabelWidth = publicLabelWidth(parent, IDC_STATIC_PUBLIC_ISP_LABEL);
+	const int row2 = hostnameLabelWidth + std::max(scaled(window, 40),
 		controlTextWidth(parent, IDC_STATIC_PUBLIC_HOSTNAME) + padding)
-		+ gap + scaled(window, 42) + std::max(scaled(window, 60),
+		+ gap + ispLabelWidth + std::max(scaled(window, 60),
 			controlTextWidth(parent, IDC_STATIC_PUBLIC_ISP) + padding);
 	return std::max(row1, row2);
 }
@@ -392,6 +405,8 @@ BEGIN_MESSAGE_MAP(WinMTRDialog, CDialog)
 	ON_CBN_CLOSEUP(IDC_COMBO_HOST, &WinMTRDialog::OnCbnCloseupComboHost)
 	ON_MESSAGE(messageTraceFinished, &WinMTRDialog::OnTraceFinished)
 	ON_MESSAGE(messageNetworkInfoReady, &WinMTRDialog::OnNetworkInfoReady)
+	ON_MESSAGE(messageTraceDataChanged, &WinMTRDialog::OnTraceDataChanged)
+	ON_MESSAGE(messageNetworkInterfaceChanged, &WinMTRDialog::OnNetworkInterfaceChanged)
 END_MESSAGE_MAP()
 
 WinMTRDialog::WinMTRDialog(CWnd* parent) noexcept
@@ -414,6 +429,8 @@ WinMTRDialog::WinMTRDialog(CWnd* parent) noexcept
 	useIPv4(WinMTRUtils::DEFAULT_USE_IPV4),
 	useIPv6(WinMTRUtils::DEFAULT_USE_IPV6),
 	queryPublicInfo(WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO),
+	publicInfoRefreshMode(WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE),
+	publicInfoRefreshMinutes(WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MINUTES),
 	historyLimit(WinMTRUtils::DEFAULT_MAX_LRU)
 {
 	icon = AfxGetApp()->LoadIconW(IDR_MAINFRAME);
@@ -422,6 +439,10 @@ WinMTRDialog::WinMTRDialog(CWnd* parent) noexcept
 
 WinMTRDialog::~WinMTRDialog()
 {
+	if (networkInterfaceNotification != nullptr) {
+		CancelMibChangeNotify2(networkInterfaceNotification);
+		networkInterfaceNotification = nullptr;
+	}
 	stopTrace();
 	stopNetworkInfoQuery();
 	if (traceThread) traceThread.reset();
@@ -484,6 +505,7 @@ BOOL WinMTRDialog::OnInitDialog()
 		}
 	}
 	InitRegistry();
+	configureNetworkInterfaceNotification();
 	buttonNetworkDetails.EnableWindow(FALSE);
 	setStatus(loadString(IDS_STATUS_READY));
 
@@ -615,9 +637,13 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 
 	// Public information uses four fields on the first row and two on the
 	// second. Natural text widths are preserved unless the screen leaves no room.
+	const std::array<int, 4> row1LabelIds{
+		IDC_STATIC_PUBLIC_IP_LABEL, IDC_STATIC_PUBLIC_COUNTRY_LABEL,
+		IDC_STATIC_PUBLIC_CITY_LABEL, IDC_STATIC_PUBLIC_ASN_LABEL
+	};
 	const std::array<int, 4> row1Labels{
-		scaled(GetSafeHwnd(), 30), scaled(GetSafeHwnd(), 52),
-		scaled(GetSafeHwnd(), 52), scaled(GetSafeHwnd(), 46)
+		publicLabelWidth(this, row1LabelIds[0]), publicLabelWidth(this, row1LabelIds[1]),
+		publicLabelWidth(this, row1LabelIds[2]), publicLabelWidth(this, row1LabelIds[3])
 	};
 	const std::array<int, 4> row1ValueIds{
 		IDC_STATIC_PUBLIC_IP, IDC_STATIC_PUBLIC_COUNTRY,
@@ -632,7 +658,7 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 	for (size_t index = 0; index < row1Widths.size(); ++index) {
 		row1MinimumWidths[index] = row1Labels[index] + row1MinimumValues[index];
 		row1Widths[index] = row1Labels[index] + std::max(row1MinimumValues[index],
-			controlTextWidth(this, row1ValueIds[index]) + scaled(GetSafeHwnd(), 12));
+			controlTextWidth(this, row1ValueIds[index]) + scaled(GetSafeHwnd(), 8));
 	}
 	const auto fitWidths = [](auto& widths, const auto& minimumWidths, int budget) {
 		const int desiredTotal = std::accumulate(widths.begin(), widths.end(), 0);
@@ -651,17 +677,17 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 		}
 	};
 
-	const int hostnameLabelWidth = scaled(GetSafeHwnd(), 84);
-	const int ispLabelWidth = scaled(GetSafeHwnd(), 42);
+	const int hostnameLabelWidth = publicLabelWidth(this, IDC_STATIC_PUBLIC_HOSTNAME_LABEL);
+	const int ispLabelWidth = publicLabelWidth(this, IDC_STATIC_PUBLIC_ISP_LABEL);
 	std::array<int, 2> row2MinimumWidths{
 		hostnameLabelWidth + scaled(GetSafeHwnd(), 40),
 		ispLabelWidth + scaled(GetSafeHwnd(), 60)
 	};
 	std::array<int, 2> row2Widths{
 		hostnameLabelWidth + std::max(scaled(GetSafeHwnd(), 40),
-			controlTextWidth(this, IDC_STATIC_PUBLIC_HOSTNAME) + scaled(GetSafeHwnd(), 12)),
+			controlTextWidth(this, IDC_STATIC_PUBLIC_HOSTNAME) + scaled(GetSafeHwnd(), 8)),
 		ispLabelWidth + std::max(scaled(GetSafeHwnd(), 60),
-			controlTextWidth(this, IDC_STATIC_PUBLIC_ISP) + scaled(GetSafeHwnd(), 12))
+			controlTextWidth(this, IDC_STATIC_PUBLIC_ISP) + scaled(GetSafeHwnd(), 8))
 	};
 	fitWidths(row2Widths, row2MinimumWidths, std::max(2, available - gap));
 	const int row2Hostname = row2Widths[0];
@@ -687,29 +713,31 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 	const int row1AsnX = row1CityX + row1City + row1Gaps[2];
 	const int row2IspX = firstX + row2Hostname + gap;
 
-	moveControl(this, IDC_STATIC_PUBLIC_IP_LABEL, firstX, line1, scaled(GetSafeHwnd(), 28), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_IP, firstX + scaled(GetSafeHwnd(), 30), line1,
-		row1Ip - scaled(GetSafeHwnd(), 30), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_IP_LABEL, firstX, line1,
+		row1Labels[0] - scaled(GetSafeHwnd(), 2), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_IP, firstX + row1Labels[0], line1,
+		row1Ip - row1Labels[0], textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_COUNTRY_LABEL, row1CountryX, line1,
-		scaled(GetSafeHwnd(), 50), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_COUNTRY, row1CountryX + scaled(GetSafeHwnd(), 52), line1,
-		row1Country - scaled(GetSafeHwnd(), 52), textHeight);
+		row1Labels[1] - scaled(GetSafeHwnd(), 2), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_COUNTRY, row1CountryX + row1Labels[1], line1,
+		row1Country - row1Labels[1], textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_CITY_LABEL, row1CityX, line1,
-		scaled(GetSafeHwnd(), 50), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_CITY, row1CityX + scaled(GetSafeHwnd(), 52), line1,
-		row1City - scaled(GetSafeHwnd(), 52), textHeight);
+		row1Labels[2] - scaled(GetSafeHwnd(), 2), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_CITY, row1CityX + row1Labels[2], line1,
+		row1City - row1Labels[2], textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_ASN_LABEL, row1AsnX, line1,
-		scaled(GetSafeHwnd(), 44), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_ASN, row1AsnX + scaled(GetSafeHwnd(), 46), line1,
-		row1Asn - scaled(GetSafeHwnd(), 46), textHeight);
+		row1Labels[3] - scaled(GetSafeHwnd(), 2), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_ASN, row1AsnX + row1Labels[3], line1,
+		row1Asn - row1Labels[3], textHeight);
 
-	moveControl(this, IDC_STATIC_PUBLIC_HOSTNAME_LABEL, firstX, line2, scaled(GetSafeHwnd(), 82), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_HOSTNAME, firstX + scaled(GetSafeHwnd(), 84), line2,
-		row2Hostname - scaled(GetSafeHwnd(), 84), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_HOSTNAME_LABEL, firstX, line2,
+		hostnameLabelWidth - scaled(GetSafeHwnd(), 2), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_HOSTNAME, firstX + hostnameLabelWidth, line2,
+		row2Hostname - hostnameLabelWidth, textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_ISP_LABEL, row2IspX, line2,
-		scaled(GetSafeHwnd(), 40), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_ISP, row2IspX + scaled(GetSafeHwnd(), 42), line2,
-		row2Isp - scaled(GetSafeHwnd(), 42), textHeight);
+		ispLabelWidth - scaled(GetSafeHwnd(), 2), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_ISP, row2IspX + ispLabelWidth, line2,
+		row2Isp - ispLabelWidth, textHeight);
 	topContentBottom = publicTop + publicHeight;
 
 	if (listIsVisible) {
@@ -768,6 +796,8 @@ CSize WinMTRDialog::minimumWindowSize()
 		const int columnsWidth = naturalColumnsWidth > 0
 			? naturalColumnsWidth
 			: scaled(GetSafeHwnd(), 830);
+		const int listFrameWidth = GetSystemMetrics(SM_CXEDGE) * 2;
+		int listFrameHeight = GetSystemMetrics(SM_CYEDGE) * 2 + scaled(GetSafeHwnd(), 2);
 		CRect itemRect;
 		int rowHeight = scaled(GetSafeHwnd(), 22);
 		if (listMtr.GetItemRect(0, itemRect, LVIR_BOUNDS)) rowHeight = itemRect.Height();
@@ -776,10 +806,17 @@ CSize WinMTRDialog::minimumWindowSize()
 			RECT headerRect{};
 			if (::GetWindowRect(header, &headerRect)) headerHeight = headerRect.bottom - headerRect.top;
 		}
-		desiredWidth = std::max(desiredWidth, columnsWidth + margin * 2 + frameWidth);
+		const int requiredListWidth = columnsWidth + listFrameWidth;
+		const int maximumListWidth = std::max(1, workWidth - frameWidth - margin * 2);
+		if (requiredListWidth > maximumListWidth) {
+			listFrameHeight += GetSystemMetrics(SM_CYHSCROLL);
+		}
+		desiredWidth = std::max(desiredWidth,
+			requiredListWidth + margin * 2 + frameWidth);
 		desiredHeight = std::max(desiredHeight,
 			topContentBottom + scaled(GetSafeHwnd(), 8) + headerHeight
-			+ rowHeight * static_cast<int>(displayRows.size()) + statusHeight + gap + frameHeight);
+			+ rowHeight * static_cast<int>(displayRows.size()) + listFrameHeight
+			+ statusHeight + gap + frameHeight);
 	}
 	return CSize(std::min(workWidth, desiredWidth), std::min(workHeight, desiredHeight));
 }
@@ -1182,6 +1219,7 @@ void WinMTRDialog::startNetworkInfoQuery()
 	}
 	if (networkInfoThread) networkInfoThread.reset();
 	networkInfoRestartPending = false;
+	lastNetworkInfoQueryTick = GetTickCount64();
 	const auto generation = ++networkInfoGeneration;
 	networkInfoRunning = true;
 	networkInfoThread.emplace([this, generation](std::stop_token token) {
@@ -1194,6 +1232,26 @@ void WinMTRDialog::startNetworkInfoQuery()
 		networkInfoRunning = false;
 		PostMessageW(messageNetworkInfoReady, static_cast<WPARAM>(generation), deliver ? 1 : 0);
 	});
+}
+
+void WinMTRDialog::configureNetworkInterfaceNotification() noexcept
+{
+	if (networkInterfaceNotification != nullptr) return;
+	HANDLE notification = nullptr;
+	if (NotifyIpInterfaceChange(AF_UNSPEC, &WinMTRDialog::NetworkInterfaceChangeCallback,
+		this, FALSE, &notification) == NO_ERROR) {
+		networkInterfaceNotification = notification;
+	}
+}
+
+VOID CALLBACK WinMTRDialog::NetworkInterfaceChangeCallback(PVOID context,
+	PMIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE) noexcept
+{
+	const auto dialog = static_cast<WinMTRDialog*>(context);
+	if (dialog == nullptr) return;
+	if (const HWND window = dialog->GetSafeHwnd(); window != nullptr) {
+		::PostMessageW(window, messageNetworkInterfaceChanged, 0, 0);
+	}
 }
 
 void WinMTRDialog::stopNetworkInfoQuery() noexcept

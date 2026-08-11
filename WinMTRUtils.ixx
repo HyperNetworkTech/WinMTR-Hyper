@@ -74,12 +74,24 @@ export namespace WinMTRUtils {
 	export constexpr auto MIN_REPLY_CACHE_SECONDS = 0u;
 	export constexpr auto MAX_REPLY_CACHE_SECONDS = 86400u;
 
+	// Country/ASN/ISP/reverse-DNS results are shared across trace sessions.
+	// A bounded 24-hour cache prevents repeated external lookups without
+	// retaining stale network ownership data indefinitely.
+	export constexpr auto RESPONDER_METADATA_CACHE_SECONDS = 86400u;
+	export constexpr auto MAX_RESPONDER_METADATA_CACHE_ENTRIES = 2048u;
+
 	export constexpr auto DEFAULT_USE_DNS = true;
 	export constexpr auto DEFAULT_LOOKUP_ASN_ISP = true;
 	export constexpr auto DEFAULT_DONT_FRAGMENT = true;
 	export constexpr auto DEFAULT_USE_IPV4 = true;
 	export constexpr auto DEFAULT_USE_IPV6 = true;
 	export constexpr auto DEFAULT_QUERY_PUBLIC_NETWORK_INFO = true;
+	export constexpr auto PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE = 0u;
+	export constexpr auto PUBLIC_INFO_REFRESH_FIXED_INTERVAL = 1u;
+	export constexpr auto DEFAULT_PUBLIC_INFO_REFRESH_MODE = PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE;
+	export constexpr auto DEFAULT_PUBLIC_INFO_REFRESH_MINUTES = 30u;
+	export constexpr auto MIN_PUBLIC_INFO_REFRESH_MINUTES = 1u;
+	export constexpr auto MAX_PUBLIC_INFO_REFRESH_MINUTES = 1440u;
 
 	// A periodic full-path discovery round lets a route grow again after a
 	// shorter/unknown tail was observed.  It is deliberately not user-facing.

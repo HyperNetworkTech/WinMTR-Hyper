@@ -70,6 +70,9 @@ export struct __declspec(novtable) IWinMTROptionsProvider {
 	virtual bool getUseIPv4() const noexcept { return WinMTRUtils::DEFAULT_USE_IPV4; }
 	virtual bool getUseIPv6() const noexcept { return WinMTRUtils::DEFAULT_USE_IPV6; }
 	virtual bool getQueryPublicNetworkInfo() const noexcept { return WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO; }
+	// Trace workers call this after each completed probe so UI providers can
+	// schedule a redraw without polling for the end of the whole TTL batch.
+	virtual void notifyTraceDataChanged() const noexcept {}
 
 	[[nodiscard]]
 	WinMTRTraceOptions snapshotTraceOptions() const noexcept

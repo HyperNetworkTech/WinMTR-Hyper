@@ -126,6 +126,8 @@
 #define IDC_CHECK_IPV4                          1123
 #define IDC_CHECK_IPV6                          1124
 #define IDC_CHECK_QUERY_PUBLIC_INFO             1125
+#define IDC_COMBO_PUBLIC_REFRESH_MODE           1126
+#define IDC_EDIT_PUBLIC_REFRESH_MINUTES         1127
 #define IDC_BUTTON_LICENSE                      1130
 #define IDC_BUTTON_RESTORE_DEFAULTS             1131
 #define IDC_OPTIONS_GROUP_BRAND                 1132
@@ -146,6 +148,8 @@
 #define IDC_OPTIONS_LABEL_ECMP                  1151
 #define IDC_OPTIONS_LABEL_REPLY_CACHE           1152
 #define IDC_OPTIONS_GROUP_NETWORK               1153
+#define IDC_OPTIONS_LABEL_PUBLIC_REFRESH        1154
+#define IDC_OPTIONS_LABEL_PUBLIC_REFRESH_MINUTES 1155
 
 // Node properties dialog controls (1200-1299)
 #define IDC_EDIT_PHOST                          1200

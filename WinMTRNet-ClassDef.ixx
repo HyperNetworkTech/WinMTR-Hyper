@@ -161,6 +161,7 @@ private:
 		std::wstring isp;
 		bool hostname_queried = false;
 		bool network_queried = false;
+		std::uint64_t cached_at_tick = 0;
 	};
 	std::unordered_map<std::wstring, responder_metadata> responder_lookup_cache;
 	std::unordered_set<std::wstring> reverse_dns_inflight;

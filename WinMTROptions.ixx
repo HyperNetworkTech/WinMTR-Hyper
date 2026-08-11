@@ -54,6 +54,8 @@ public:
 	static constexpr bool DefaultUseIPv4 = WinMTRUtils::DEFAULT_USE_IPV4;
 	static constexpr bool DefaultUseIPv6 = WinMTRUtils::DEFAULT_USE_IPV6;
 	static constexpr bool DefaultQueryPublicInfo = WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO;
+	static constexpr unsigned DefaultPublicRefreshMode = WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE;
+	static constexpr unsigned DefaultPublicRefreshMinutes = WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MINUTES;
 
 	explicit WinMTROptions(CWnd* pParent = nullptr);
 
@@ -80,6 +82,8 @@ public:
 	void SetUseIPv6(bool value) noexcept { useIPv6 = value; }
 	void SetQueryPublicInfoOnStartup(bool value) noexcept { queryPublicInfo = value; }
 	void SetQueryPublicNetworkInfo(bool value) noexcept { SetQueryPublicInfoOnStartup(value); }
+	void SetPublicInfoRefreshMode(unsigned value) noexcept { publicInfoRefreshMode = value; }
+	void SetPublicInfoRefreshMinutes(unsigned value) noexcept { publicInfoRefreshMinutes = value; }
 
 	[[nodiscard]] double GetInterval() const noexcept { return interval; }
 	[[nodiscard]] unsigned GetPingSize() const noexcept { return packetSize; }
@@ -104,6 +108,8 @@ public:
 	[[nodiscard]] bool GetUseIPv6() const noexcept { return useIPv6; }
 	[[nodiscard]] bool GetQueryPublicInfoOnStartup() const noexcept { return queryPublicInfo; }
 	[[nodiscard]] bool GetQueryPublicNetworkInfo() const noexcept { return GetQueryPublicInfoOnStartup(); }
+	[[nodiscard]] unsigned GetPublicInfoRefreshMode() const noexcept { return publicInfoRefreshMode; }
+	[[nodiscard]] unsigned GetPublicInfoRefreshMinutes() const noexcept { return publicInfoRefreshMinutes; }
 
 	enum { IDD = IDD_DIALOG_OPTIONS };
 
@@ -117,6 +123,7 @@ protected:
 	afx_msg void OnVScroll(UINT scrollCode, UINT position, CScrollBar* scrollBar);
 	afx_msg void OnHScroll(UINT scrollCode, UINT position, CScrollBar* scrollBar);
 	afx_msg BOOL OnMouseWheel(UINT flags, short delta, CPoint point);
+	afx_msg void OnPublicRefreshSettingChanged();
 	DECLARE_MESSAGE_MAP()
 
 private:
@@ -144,6 +151,8 @@ private:
 	static constexpr unsigned MaxEcmpDisplayLimit = WinMTRUtils::MAX_ECMP_RESPONDERS;
 	static constexpr unsigned MinReplyCacheSeconds = WinMTRUtils::MIN_REPLY_CACHE_SECONDS;
 	static constexpr unsigned MaxReplyCacheSeconds = WinMTRUtils::MAX_REPLY_CACHE_SECONDS;
+	static constexpr unsigned MinPublicRefreshMinutes = WinMTRUtils::MIN_PUBLIC_INFO_REFRESH_MINUTES;
+	static constexpr unsigned MaxPublicRefreshMinutes = WinMTRUtils::MAX_PUBLIC_INFO_REFRESH_MINUTES;
 
 	double interval = DefaultInterval;
 	unsigned packetSize = DefaultPacketSize;
@@ -164,6 +173,8 @@ private:
 	bool useIPv4 = DefaultUseIPv4;
 	bool useIPv6 = DefaultUseIPv6;
 	bool queryPublicInfo = DefaultQueryPublicInfo;
+	unsigned publicInfoRefreshMode = DefaultPublicRefreshMode;
+	unsigned publicInfoRefreshMinutes = DefaultPublicRefreshMinutes;
 
 	CEdit editInterval;
 	CEdit editPacketSize;
@@ -184,6 +195,8 @@ private:
 	CButton checkIPv4;
 	CButton checkIPv6;
 	CButton checkQueryPublicInfo;
+	CComboBox comboPublicRefreshMode;
+	CEdit editPublicRefreshMinutes;
 	CFont technicalFont;
 	int scrollPosition = 0;
 	int scrollMaximum = 0;
@@ -192,6 +205,7 @@ private:
 
 	void RestoreDefaultValues() noexcept;
 	void PopulateControls();
+	void UpdatePublicRefreshControls();
 	void ApplyTechnicalFont();
 	void ShowRangeError();
 	void ConfigureResponsiveLayout();
@@ -289,6 +303,8 @@ namespace
 BEGIN_MESSAGE_MAP(WinMTROptions, CDialog)
 	ON_BN_CLICKED(IDC_BUTTON_LICENSE, &WinMTROptions::OnLicense)
 	ON_BN_CLICKED(IDC_BUTTON_RESTORE_DEFAULTS, &WinMTROptions::OnRestoreDefaults)
+	ON_BN_CLICKED(IDC_CHECK_QUERY_PUBLIC_INFO, &WinMTROptions::OnPublicRefreshSettingChanged)
+	ON_CBN_SELCHANGE(IDC_COMBO_PUBLIC_REFRESH_MODE, &WinMTROptions::OnPublicRefreshSettingChanged)
 	ON_WM_VSCROLL()
 	ON_WM_HSCROLL()
 	ON_WM_MOUSEWHEEL()
@@ -321,6 +337,8 @@ void WinMTROptions::DoDataExchange(CDataExchange* pDX)
 	DDX_Control(pDX, IDC_CHECK_IPV4, checkIPv4);
 	DDX_Control(pDX, IDC_CHECK_IPV6, checkIPv6);
 	DDX_Control(pDX, IDC_CHECK_QUERY_PUBLIC_INFO, checkQueryPublicInfo);
+	DDX_Control(pDX, IDC_COMBO_PUBLIC_REFRESH_MODE, comboPublicRefreshMode);
+	DDX_Control(pDX, IDC_EDIT_PUBLIC_REFRESH_MINUTES, editPublicRefreshMinutes);
 }
 
 BOOL WinMTROptions::OnInitDialog()
@@ -358,6 +376,33 @@ void WinMTROptions::PopulateControls()
 	checkIPv4.SetCheck(useIPv4 ? BST_CHECKED : BST_UNCHECKED);
 	checkIPv6.SetCheck(useIPv6 ? BST_CHECKED : BST_UNCHECKED);
 	checkQueryPublicInfo.SetCheck(queryPublicInfo ? BST_CHECKED : BST_UNCHECKED);
+	if (comboPublicRefreshMode.GetCount() == 0) {
+		comboPublicRefreshMode.AddString(L"網路變更時");
+		comboPublicRefreshMode.AddString(L"固定時間");
+	}
+	comboPublicRefreshMode.SetCurSel(publicInfoRefreshMode ==
+		WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL ? 1 : 0);
+	SetUnsignedText(editPublicRefreshMinutes, publicInfoRefreshMinutes);
+	UpdatePublicRefreshControls();
+}
+
+void WinMTROptions::UpdatePublicRefreshControls()
+{
+	const BOOL queryEnabled = checkQueryPublicInfo.GetCheck() == BST_CHECKED;
+	const BOOL fixedInterval = queryEnabled && comboPublicRefreshMode.GetCurSel() == 1;
+	comboPublicRefreshMode.EnableWindow(queryEnabled);
+	editPublicRefreshMinutes.EnableWindow(fixedInterval);
+	if (CWnd* label = GetDlgItem(IDC_OPTIONS_LABEL_PUBLIC_REFRESH); label != nullptr) {
+		label->EnableWindow(queryEnabled);
+	}
+	if (CWnd* label = GetDlgItem(IDC_OPTIONS_LABEL_PUBLIC_REFRESH_MINUTES); label != nullptr) {
+		label->EnableWindow(fixedInterval);
+	}
+}
+
+void WinMTROptions::OnPublicRefreshSettingChanged()
+{
+	UpdatePublicRefreshControls();
 }
 
 void WinMTROptions::ApplyTechnicalFont()
@@ -368,7 +413,8 @@ void WinMTROptions::ApplyTechnicalFont()
 			&editInterval, &editPacketSize, &editMaxHops, &editTimeoutMs,
 			&editCycles, &editTos, &editPattern, &editHistoryLimit,
 			&editStartTtl, &editMinimumTtl, &editUnknownLimit,
-			&editEcmpDisplayLimit, &editReplyCacheSeconds
+			&editEcmpDisplayLimit, &editReplyCacheSeconds,
+			&editPublicRefreshMinutes
 		};
 		for (CEdit* edit : technicalEdits) {
 			edit->SetFont(&technicalFont);
@@ -398,7 +444,7 @@ void WinMTROptions::ConfigureResponsiveLayout()
 	// A narrow single-column layout keeps every field and button fully visible;
 	// the existing vertical viewport handles the additional height.
 	constexpr int clientWidthDlu = 260;
-	constexpr int clientHeightDlu = 438;
+	constexpr int clientHeightDlu = 470;
 	MoveControlDlu(IDC_OPTIONS_GROUP_BRAND, 7, 7, 246, 29);
 	MoveControlDlu(IDC_OPTIONS_ICON, 15, 12, 18, 18);
 	MoveControlDlu(IDC_OPTIONS_PRODUCT, 42, 14, 201, 14);
@@ -426,7 +472,7 @@ void WinMTROptions::ConfigureResponsiveLayout()
 		MoveControlDlu(rows[index].edit, 191, labelY - 2, 52, 14);
 	}
 
-	MoveControlDlu(IDC_OPTIONS_GROUP_NETWORK, 7, 275, 246, 105);
+	MoveControlDlu(IDC_OPTIONS_GROUP_NETWORK, 7, 275, 246, 137);
 	constexpr int checkIds[] = {
 		IDC_CHECK_RESOLVE_NAMES, IDC_CHECK_LOOKUP_ASN_ISP,
 		IDC_CHECK_DONT_FRAGMENT, IDC_CHECK_IPV4, IDC_CHECK_IPV6,
@@ -435,11 +481,15 @@ void WinMTROptions::ConfigureResponsiveLayout()
 	for (int index = 0; index < static_cast<int>(std::size(checkIds)); ++index) {
 		MoveControlDlu(checkIds[index], 15, 288 + index * 15, 228, 12);
 	}
+	MoveControlDlu(IDC_OPTIONS_LABEL_PUBLIC_REFRESH, 15, 382, 82, 11);
+	MoveControlDlu(IDC_COMBO_PUBLIC_REFRESH_MODE, 100, 379, 78, 70);
+	MoveControlDlu(IDC_EDIT_PUBLIC_REFRESH_MINUTES, 182, 379, 34, 14);
+	MoveControlDlu(IDC_OPTIONS_LABEL_PUBLIC_REFRESH_MINUTES, 220, 382, 28, 11);
 
-	MoveControlDlu(IDC_BUTTON_LICENSE, 7, 388, 90, 18);
-	MoveControlDlu(IDC_BUTTON_RESTORE_DEFAULTS, 103, 388, 75, 18);
-	MoveControlDlu(IDOK, 127, 412, 56, 18);
-	MoveControlDlu(IDCANCEL, 187, 412, 56, 18);
+	MoveControlDlu(IDC_BUTTON_LICENSE, 7, 420, 90, 18);
+	MoveControlDlu(IDC_BUTTON_RESTORE_DEFAULTS, 103, 420, 75, 18);
+	MoveControlDlu(IDOK, 127, 444, 56, 18);
+	MoveControlDlu(IDCANCEL, 187, 444, 56, 18);
 
 	CRect desiredClient(0, 0, clientWidthDlu, clientHeightDlu);
 	MapDialogRect(&desiredClient);
@@ -627,6 +677,8 @@ void WinMTROptions::RestoreDefaultValues() noexcept
 	useIPv4 = DefaultUseIPv4;
 	useIPv6 = DefaultUseIPv6;
 	queryPublicInfo = DefaultQueryPublicInfo;
+	publicInfoRefreshMode = DefaultPublicRefreshMode;
+	publicInfoRefreshMinutes = DefaultPublicRefreshMinutes;
 }
 
 void WinMTROptions::OnRestoreDefaults()
@@ -660,6 +712,7 @@ void WinMTROptions::OnOK()
 	unsigned parsedUnknownLimit = 0;
 	unsigned parsedEcmpDisplayLimit = 0;
 	unsigned parsedReplyCacheSeconds = 0;
+	unsigned parsedPublicRefreshMinutes = 0;
 
 	const bool valid =
 		ParseDouble(editInterval, parsedInterval) &&
@@ -675,6 +728,7 @@ void WinMTROptions::OnOK()
 		ParseUnsigned(editUnknownLimit, parsedUnknownLimit) &&
 		ParseUnsigned(editEcmpDisplayLimit, parsedEcmpDisplayLimit) &&
 		ParseUnsigned(editReplyCacheSeconds, parsedReplyCacheSeconds) &&
+		ParseUnsigned(editPublicRefreshMinutes, parsedPublicRefreshMinutes) &&
 		InRange(parsedInterval, MinInterval, MaxInterval) &&
 		InRange(parsedPacketSize, MinPacketSize, MaxPacketSize) &&
 		InRange(parsedMaxHops, MinMaxHops, MaxMaxHops) &&
@@ -687,7 +741,8 @@ void WinMTROptions::OnOK()
 		InRange(parsedMinimumTtl, MinMinimumTtl, parsedMaxHops) &&
 		InRange(parsedUnknownLimit, MinUnknownLimit, MaxUnknownLimit) &&
 		InRange(parsedEcmpDisplayLimit, MinEcmpDisplayLimit, MaxEcmpDisplayLimit) &&
-		InRange(parsedReplyCacheSeconds, MinReplyCacheSeconds, MaxReplyCacheSeconds);
+		InRange(parsedReplyCacheSeconds, MinReplyCacheSeconds, MaxReplyCacheSeconds) &&
+		InRange(parsedPublicRefreshMinutes, MinPublicRefreshMinutes, MaxPublicRefreshMinutes);
 
 	if (!valid) {
 		ShowRangeError();
@@ -721,6 +776,10 @@ void WinMTROptions::OnOK()
 	useIPv4 = parsedUseIPv4;
 	useIPv6 = parsedUseIPv6;
 	queryPublicInfo = checkQueryPublicInfo.GetCheck() == BST_CHECKED;
+	publicInfoRefreshMode = comboPublicRefreshMode.GetCurSel() == 1
+		? WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL
+		: WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE;
+	publicInfoRefreshMinutes = parsedPublicRefreshMinutes;
 
 	CDialog::OnOK();
 }

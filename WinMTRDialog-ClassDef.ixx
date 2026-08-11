@@ -8,6 +8,7 @@ module;
 #include <afxdisp.h>
 #include <afxcmn.h>
 #include <afxlinkctrl.h>
+#include <iphlpapi.h>
 #include "resource.h"
 #include "WinMTRBranding.h"
 #include "WinMTRNetworkData.h"
@@ -70,6 +71,12 @@ public:
 	[[nodiscard]] bool getUseIPv4() const noexcept override { return useIPv4.load(); }
 	[[nodiscard]] bool getUseIPv6() const noexcept override { return useIPv6.load(); }
 	[[nodiscard]] bool getQueryPublicNetworkInfo() const noexcept override { return queryPublicInfo.load(); }
+	void notifyTraceDataChanged() const noexcept override
+	{
+		if (const HWND window = GetSafeHwnd(); window != nullptr) {
+			::PostMessageW(window, messageTraceDataChanged, 0, 0);
+		}
+	}
 
 protected:
 	void DoDataExchange(CDataExchange* dataExchange) override;
@@ -82,6 +89,8 @@ private:
 	static constexpr UINT dialogTimerMs = 100;
 	static constexpr UINT messageTraceFinished = WM_APP + 20;
 	static constexpr UINT messageNetworkInfoReady = WM_APP + 21;
+	static constexpr UINT messageTraceDataChanged = WM_APP + 22;
+	static constexpr UINT messageNetworkInterfaceChanged = WM_APP + 23;
 
 	enum class DisplayRowKind { primary, responder, unknown_range };
 	struct DisplayRow final {
@@ -142,6 +151,8 @@ private:
 	std::atomic_bool useIPv4;
 	std::atomic_bool useIPv6;
 	std::atomic_bool queryPublicInfo;
+	std::atomic_uint publicInfoRefreshMode;
+	std::atomic_uint publicInfoRefreshMinutes;
 	unsigned historyLimit;
 	unsigned persistentHistoryLimit = WinMTRUtils::DEFAULT_MAX_LRU;
 	std::vector<std::wstring> sessionHistory;
@@ -158,12 +169,18 @@ private:
 	std::atomic_uint64_t networkInfoGeneration = 0;
 	std::atomic_bool networkInfoRunning = false;
 	std::atomic_bool networkInfoRestartPending = false;
+	HANDLE networkInterfaceNotification = nullptr;
+	std::uint64_t lastNetworkInfoQueryTick = 0;
+	std::uint64_t lastNetworkChangeRefreshTick = 0;
 
 	void pingThread(std::stop_token stopToken, std::wstring host,
 		std::uint64_t generation) noexcept;
 	void stopTrace() noexcept;
 	void startNetworkInfoQuery();
 	void stopNetworkInfoQuery() noexcept;
+	void configureNetworkInterfaceNotification() noexcept;
+	static VOID CALLBACK NetworkInterfaceChangeCallback(PVOID context,
+		PMIB_IPINTERFACE_ROW row, MIB_NOTIFICATION_TYPE notificationType) noexcept;
 	void updateNetworkInfoSummary();
 	void showNetworkInfoDialog();
 	void setStatus(const wchar_t* text);
@@ -215,6 +232,8 @@ private:
 	afx_msg void OnClose();
 	afx_msg LRESULT OnTraceFinished(WPARAM result, LPARAM errorCode);
 	afx_msg LRESULT OnNetworkInfoReady(WPARAM generation, LPARAM unused);
+	afx_msg LRESULT OnTraceDataChanged(WPARAM, LPARAM);
+	afx_msg LRESULT OnNetworkInterfaceChanged(WPARAM, LPARAM);
 
 	DECLARE_MESSAGE_MAP()
 };

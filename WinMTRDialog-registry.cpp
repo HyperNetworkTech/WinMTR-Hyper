@@ -146,6 +146,14 @@ BOOL WinMTRDialog::InitRegistry() noexcept
 	useIPv6 = queryDword(config, L"UseIPv6", WinMTRUtils::DEFAULT_USE_IPV6) != 0;
 	queryPublicInfo = queryDword(config, L"QueryPublicInfo",
 		WinMTRUtils::DEFAULT_QUERY_PUBLIC_NETWORK_INFO) != 0;
+	publicInfoRefreshMode = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMode",
+		WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MODE),
+		WinMTRUtils::PUBLIC_INFO_REFRESH_ON_NETWORK_CHANGE,
+		WinMTRUtils::PUBLIC_INFO_REFRESH_FIXED_INTERVAL);
+	publicInfoRefreshMinutes = std::clamp<unsigned>(queryDword(config, L"PublicInfoRefreshMinutes",
+		WinMTRUtils::DEFAULT_PUBLIC_INFO_REFRESH_MINUTES),
+		WinMTRUtils::MIN_PUBLIC_INFO_REFRESH_MINUTES,
+		WinMTRUtils::MAX_PUBLIC_INFO_REFRESH_MINUTES);
 
 	auto persistedHosts = loadPersistedHistory();
 	if (!hasHistoryLimitFromCommandLine) {
@@ -185,6 +193,8 @@ void WinMTRDialog::SaveSettings() noexcept
 	config.SetDWORDValue(L"UseIPv4", useIPv4.load() ? 1 : 0);
 	config.SetDWORDValue(L"UseIPv6", useIPv6.load() ? 1 : 0);
 	config.SetDWORDValue(L"QueryPublicInfo", queryPublicInfo.load() ? 1 : 0);
+	config.SetDWORDValue(L"PublicInfoRefreshMode", publicInfoRefreshMode.load());
+	config.SetDWORDValue(L"PublicInfoRefreshMinutes", publicInfoRefreshMinutes.load());
 }
 
 void WinMTRDialog::ClearHistory()
@@ -270,9 +280,13 @@ void WinMTRDialog::OnOptions()
 	options.SetUseIPv4(useIPv4.load());
 	options.SetUseIPv6(useIPv6.load());
 	options.SetQueryPublicInfoOnStartup(queryPublicInfo.load());
+	options.SetPublicInfoRefreshMode(publicInfoRefreshMode.load());
+	options.SetPublicInfoRefreshMinutes(publicInfoRefreshMinutes.load());
 	if (options.DoModal() != IDOK) return;
 
 	const bool previouslyQuerying = queryPublicInfo.load();
+	const unsigned previousRefreshMode = publicInfoRefreshMode.load();
+	const unsigned previousRefreshMinutes = publicInfoRefreshMinutes.load();
 	interval = options.GetInterval();
 	packetSize = options.GetPingSize();
 	maxHops = options.GetMaxHops();
@@ -294,6 +308,8 @@ void WinMTRDialog::OnOptions()
 	useIPv4 = options.GetUseIPv4();
 	useIPv6 = options.GetUseIPv6();
 	queryPublicInfo = options.GetQueryPublicInfoOnStartup();
+	publicInfoRefreshMode = options.GetPublicInfoRefreshMode();
+	publicInfoRefreshMinutes = options.GetPublicInfoRefreshMinutes();
 	SaveSettings();
 
 	auto hosts = sessionHistory;
@@ -305,7 +321,9 @@ void WinMTRDialog::OnOptions()
 	historyCount = static_cast<int>(hosts.size());
 	persistHistory(hosts);
 
-	if (!previouslyQuerying && queryPublicInfo.load()) startNetworkInfoQuery();
+	const bool refreshPolicyChanged = previousRefreshMode != publicInfoRefreshMode.load()
+		|| previousRefreshMinutes != publicInfoRefreshMinutes.load();
+	if ((!previouslyQuerying || refreshPolicyChanged) && queryPublicInfo.load()) startNetworkInfoQuery();
 	else if (previouslyQuerying && !queryPublicInfo.load()) {
 		networkInfoRestartPending = false;
 		stopNetworkInfoQuery();
