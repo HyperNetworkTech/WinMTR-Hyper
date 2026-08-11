@@ -271,9 +271,9 @@ void WinMTRStatusBar::RepositionControls() noexcept
 			} // if( (dwPaneStyle & SBPS_STRETCH ) == 0 )
 			else
 			{
-				CRect rcClient;
-				GetClientRect(&rcClient);
-				rcPane.right = rcClient.right;
+				CRect lastPaneClient;
+				GetClientRect(&lastPaneClient);
+				rcPane.right = lastPaneClient.right;
 				if ((GetStyle() & SBARS_SIZEGRIP) == SBARS_SIZEGRIP)
 				{
 					int cxSmIcon = MulDiv(::GetSystemMetrics(SM_CXSMICON), static_cast<int>(dpi), 96);

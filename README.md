@@ -53,7 +53,7 @@ Windows 7 建議安裝 SP1、系統安全性更新、TLS 1.2 與最新根憑證�
 WinMTR.exe [選項] "目標主機"
 ```
 
-支援的既有參數：
+常用參數：
 
 | 參數 | 用途 |
 |---|---|
@@ -62,6 +62,9 @@ WinMTR.exe [選項] "目標主機"
 | `--maxLRU VALUE`、`-m VALUE` | 設定目標主機歷程上限 |
 | `--numeric`、`-n` | 本次啟動不解析主機名稱 |
 | `--help`、`-h` | 顯示繁體中文說明 |
+
+完整數值範圍、所有 GUI 等價 long options 與 process exit code 請見
+[`docs/CLI.md`](docs/CLI.md)。
 
 命令列指定的設定只覆蓋本次啟動所讀取的對應保存值。提供目標主機後，
 程式會自動開始追蹤。Unicode、空白與引號會由 Windows Unicode 命令列處理；
@@ -86,7 +89,8 @@ DNS 設定。
 - IPv6：`v6.ipinfo.io`，公網 IP 備援為 `api6.ipify.org`。
 - DNS／ECS：`whoami.ds.akahelp.net`。
 - 地區與網路業者備援：`ipapi.co`。
-- ASN／ISP 備援：Team Cymru ASN 查詢服務。
+- 節點與公網 ASN／ISP：ipinfo 為主要來源；單筆主要結果完全不可用時，才使用
+  Team Cymru ASN 查詢服務或設定的次要備援，且不混合來源欄位。
 
 詳細資料只列出本次實際成功使用的來源。本程式不使用
 `edns.ip-api.com`，不偵測或要求 Google DNS，也不會把系統 DNS 改成
@@ -126,6 +130,10 @@ CMake 設定會拒絕 32 位元目標。專案使用靜態 MFC／CRT 的 Release
 產品名稱、版本、公司、網址、字型及網路資訊來源集中在
 [`WinMTRBranding.h`](WinMTRBranding.h)。完整位置與同步規則請參閱
 [`CUSTOMIZATION.md`](CUSTOMIZATION.md)。
+
+量測公式、匯出契約與安全政策分別記錄於
+[`docs/STATISTICS.md`](docs/STATISTICS.md)、
+[`docs/EXPORT_FORMATS.md`](docs/EXPORT_FORMATS.md) 與 [`SECURITY.md`](SECURITY.md)。
 
 ## 授權
 

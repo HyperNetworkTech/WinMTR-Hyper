@@ -7,6 +7,8 @@ project(
     LANGUAGES CXX RC
 )
 
+option(WINMTR_ENABLE_ASAN "Enable AddressSanitizer for the pure core tests" OFF)
+
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "WinMTR 只能使用 Microsoft C++ 工具鏈建置 Windows 版本。")
 endif()
@@ -77,6 +79,9 @@ target_compile_definitions(WinMTR PRIVATE
 
 target_compile_options(WinMTR PRIVATE
     /utf-8
+    /W4
+    /WX
+    /sdl
     /permissive-
     /Zc:__cplusplus
     /translateInclude
@@ -127,11 +132,18 @@ if(BUILD_TESTING)
     target_compile_features(WinMTRCoreTests PRIVATE cxx_std_23)
     target_compile_options(WinMTRCoreTests PRIVATE
         /utf-8
+        /W4
+        /WX
+        /sdl
         /permissive-
         /Zc:__cplusplus
     )
     set_property(TARGET WinMTRCoreTests PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
+    if(WINMTR_ENABLE_ASAN)
+        target_compile_options(WinMTRCoreTests PRIVATE /fsanitize=address)
+        target_link_options(WinMTRCoreTests PRIVATE /fsanitize=address)
+    endif()
     add_test(NAME probe_scheduler COMMAND WinMTRCoreTests)
 endif()

@@ -7,6 +7,9 @@ on:
   pull_request:
     branches:
       - master
+  workflow_dispatch:
+  schedule:
+    - cron: "23 18 * * 2"
 
 permissions:
   contents: read
@@ -19,6 +22,7 @@ jobs:
   build-and-test:
     name: x64 ${{ matrix.configuration }}
     runs-on: windows-2022
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -30,18 +34,90 @@ jobs:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v4
 
-      - name: Configure
+      - name: Locate MSBuild
+        id: msbuild
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+            -find "MSBuild\**\Bin\MSBuild.exe" | Select-Object -First 1
+          if (-not $msbuild) { throw "MSBuild was not found" }
+          "path=$msbuild" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build checked-in Visual Studio solution
+        shell: pwsh
+        run: |
+          & "${{ steps.msbuild.outputs.path }}" WinMTR.sln /m `
+            "/p:Configuration=${{ matrix.configuration }}" /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Configure authoritative CMake build
         run: >-
           cmake -S . -B "out/build/${{ matrix.configuration }}"
           -G "Visual Studio 17 2022" -A x64
           -DBUILD_TESTING=ON
 
-      - name: Build
+      - name: Build CMake graph
         run: >-
           cmake --build "out/build/${{ matrix.configuration }}"
           --config "${{ matrix.configuration }}" --parallel
 
-      - name: Test
+      - name: Run offline tests
         run: >-
           ctest --test-dir "out/build/${{ matrix.configuration }}"
           -C "${{ matrix.configuration }}" --output-on-failure
+
+      - name: Validate report schema and golden sample
+        run: python tests/validate_report_schema.py
+
+      - name: Verify x64 release imports and manifest policy
+        if: matrix.configuration == 'Release'
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * `
+            -find "VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin was not found" }
+          $dependencies = & $dumpbin /dependents Release_x64\WinMTR.exe | Out-String
+          if ($dependencies -match '(?im)^\s*(VCRUNTIME|MSVCP|MFC)[^\s]*\.DLL\s*$') {
+            throw "Release artifact unexpectedly imports a dynamic VC/MFC runtime`n$dependencies"
+          }
+          if (-not (Select-String -Path app.manifest -SimpleMatch 'level="asInvoker"')) {
+            throw "Application manifest must remain asInvoker"
+          }
+          $hash = (Get-FileHash Release_x64\WinMTR.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *WinMTR.exe" | Set-Content Release_x64\SHA256SUMS.txt -Encoding ascii
+
+      - name: Upload verified release artifact
+        if: matrix.configuration == 'Release'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: WinMTR-Hyper-x64-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            Release_x64/WinMTR.exe
+            Release_x64/WinMTR.pdb
+            Release_x64/SHA256SUMS.txt
+            docs/schema/winmtr-report-v1.json
+
+  address-sanitizer:
+    name: x64 core AddressSanitizer
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v4
+
+      - name: Configure ASAN core tests
+        run: >-
+          cmake -S . -B out/build/asan
+          -G "Visual Studio 17 2022" -A x64
+          -DBUILD_TESTING=ON -DWINMTR_ENABLE_ASAN=ON
+
+      - name: Build ASAN core tests
+        run: cmake --build out/build/asan --config Debug --target WinMTRCoreTests --parallel
+
+      - name: Run ASAN core tests
+        run: ctest --test-dir out/build/asan -C Debug --output-on-failure

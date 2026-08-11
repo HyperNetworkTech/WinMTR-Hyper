@@ -1,5 +1,6 @@
 #include "WinMTRProbeScheduler.h"
 #include "WinMTRJson.h"
+#include "WinMTRSerialization.h"
 
 #include <cmath>
 #include <cstdint>
@@ -250,6 +251,45 @@ void test_json_string_parser_boundaries()
 		"oversized JSON input was accepted");
 }
 
+void test_serialization_security_and_unicode()
+{
+	using winmtr::serialization::csvCell;
+	using winmtr::serialization::jsonEscape;
+	require(csvCell(L"=SUM(A1:A2)") == L"'=SUM(A1:A2)",
+		"CSV formula prefix was not neutralized");
+	require(csvCell(L"+cmd") == L"'+cmd" && csvCell(L"-1") == L"'-1"
+		&& csvCell(L"@name") == L"'@name",
+		"CSV formula protection did not cover all dangerous prefixes");
+	require(csvCell(L"a,\"b\"") == L"\"a,\"\"b\"\"\"",
+		"CSV quoting did not preserve comma and quotes");
+	require(jsonEscape(L"台灣🌐") == L"台灣🌐",
+		"valid non-BMP JSON text was changed");
+	require(jsonEscape(L"line\nquote\"") == L"line\\nquote\\\"",
+		"JSON controls and quotes were not escaped");
+	const std::wstring unpairedHigh(1, static_cast<wchar_t>(0xd800));
+	const std::wstring unpairedLow(1, static_cast<wchar_t>(0xdc00));
+	require(jsonEscape(unpairedHigh) == L"\\ufffd"
+		&& jsonEscape(unpairedLow) == L"\\ufffd",
+		"unpaired UTF-16 surrogate was not replaced deterministically");
+}
+
+void fuzz_json_parser_offline()
+{
+	std::uint64_t state = 0x243f6a8885a308d3ull;
+	for (std::size_t iteration = 0; iteration < 10'000; ++iteration) {
+		state ^= state << 13;
+		state ^= state >> 7;
+		state ^= state << 17;
+		const std::size_t length = static_cast<std::size_t>(state % 2048u);
+		std::string input(length, '\0');
+		for (char& value : input) {
+			state = state * 6364136223846793005ull + 1442695040888963407ull;
+			value = static_cast<char>(state >> 56);
+		}
+		(void)winmtr::json::get_string(input, "ip");
+	}
+}
+
 } // namespace
 
 int main()
@@ -263,6 +303,8 @@ int main()
 		test_restart_epoch_race_10_000_times();
 		test_start_stop_late_completion_race_10_000_times();
 		test_json_string_parser_boundaries();
+		test_serialization_security_and_unicode();
+		fuzz_json_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;
 	}
