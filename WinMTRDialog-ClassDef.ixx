@@ -187,6 +187,8 @@ private:
 	void screenshotToClipboard();
 
 	afx_msg void OnPaint();
+	afx_msg BOOL OnEraseBkgnd(CDC* dc);
+	afx_msg HBRUSH OnCtlColor(CDC* dc, CWnd* window, UINT controlType);
 	afx_msg void OnSize(UINT type, int width, int height);
 	afx_msg void OnSizing(UINT side, LPRECT rect);
 	afx_msg void OnGetMinMaxInfo(MINMAXINFO* info);

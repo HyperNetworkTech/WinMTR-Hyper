@@ -91,7 +91,7 @@ void moveControl(CWnd* parent, int id, int x, int y, int width, int height)
 {
 	if (auto control = parent->GetDlgItem(id); control != nullptr && ::IsWindow(control->GetSafeHwnd())) {
 		control->SetWindowPos(nullptr, x, y, std::max(width, 1), std::max(height, 1),
-			SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+			SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS | SWP_NOREDRAW);
 	}
 }
 
@@ -303,6 +303,8 @@ constexpr std::array<UINT, 14> columnStringIds{
 
 BEGIN_MESSAGE_MAP(WinMTRDialog, CDialog)
 	ON_WM_PAINT()
+	ON_WM_ERASEBKGND()
+	ON_WM_CTLCOLOR()
 	ON_WM_SIZE()
 	ON_WM_SIZING()
 	ON_WM_GETMINMAXINFO()
@@ -500,6 +502,10 @@ void WinMTRDialog::OnSize(UINT type, int width, int height)
 void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 {
 	if (!::IsWindow(groupTarget.GetSafeHwnd())) return;
+	// Moving every child one by one lets Windows repaint intermediate layouts,
+	// which leaves group-box frames and buttons visible at their old positions.
+	// Suppress those intermediate paints and render the completed layout once.
+	SetRedraw(FALSE);
 	const int margin = scaled(GetSafeHwnd(), 10);
 	const int gap = scaled(GetSafeHwnd(), 8);
 	const int groupHeight = scaled(GetSafeHwnd(), 52);
@@ -553,28 +559,70 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 	const int textHeight = scaled(GetSafeHwnd(), 18);
 	const int firstX = margin + gap;
 
-	// Size the two rows independently. Hostname receives space from ISP on the
-	// second row, while ASN retains a compact guaranteed block. This keeps a
-	// normal FQDN fully visible at the compact window size; ISP may ellipsize.
-	const int row1Ip = available * 50 / 100;
-	const int row1Country = available * 23 / 100;
-	const int row1City = std::max(1, available - row1Ip - row1Country - gap * 2);
+	// Public information uses four compact fields on the first row and two on
+	// the second. Each field is content-sized; only long values are capped.
+	const std::array<int, 4> row1Labels{
+		scaled(GetSafeHwnd(), 30), scaled(GetSafeHwnd(), 52),
+		scaled(GetSafeHwnd(), 52), scaled(GetSafeHwnd(), 46)
+	};
+	const std::array<int, 4> row1ValueIds{
+		IDC_STATIC_PUBLIC_IP, IDC_STATIC_PUBLIC_COUNTRY,
+		IDC_STATIC_PUBLIC_CITY, IDC_STATIC_PUBLIC_ASN
+	};
+	const std::array<int, 4> row1MinimumValues{
+		scaled(GetSafeHwnd(), 48), scaled(GetSafeHwnd(), 36),
+		scaled(GetSafeHwnd(), 42), scaled(GetSafeHwnd(), 48)
+	};
+	const std::array<int, 4> row1MaximumValues{
+		scaled(GetSafeHwnd(), 210), scaled(GetSafeHwnd(), 140),
+		scaled(GetSafeHwnd(), 180), scaled(GetSafeHwnd(), 120)
+	};
+	std::array<int, 4> row1Widths{};
+	std::array<int, 4> row1MinimumWidths{};
+	for (size_t index = 0; index < row1Widths.size(); ++index) {
+		row1MinimumWidths[index] = row1Labels[index] + row1MinimumValues[index];
+		row1Widths[index] = row1Labels[index] + std::clamp(
+			controlTextWidth(this, row1ValueIds[index]) + scaled(GetSafeHwnd(), 12),
+			row1MinimumValues[index], row1MaximumValues[index]);
+	}
+	const int row1Budget = std::max(4, available - gap * 3);
+	const int desiredTotal = std::accumulate(row1Widths.begin(), row1Widths.end(), 0);
+	const int minimumTotal = std::accumulate(row1MinimumWidths.begin(), row1MinimumWidths.end(), 0);
+	if (desiredTotal > row1Budget && row1Budget > minimumTotal) {
+		const int extraBudget = row1Budget - minimumTotal;
+		const int extraWanted = desiredTotal - minimumTotal;
+		int assignedExtra = 0;
+		for (size_t index = 0; index < row1Widths.size(); ++index) {
+			const int wanted = row1Widths[index] - row1MinimumWidths[index];
+			const int extra = index + 1 == row1Widths.size()
+				? extraBudget - assignedExtra
+				: MulDiv(extraBudget, wanted, extraWanted);
+			row1Widths[index] = row1MinimumWidths[index] + extra;
+			assignedExtra += extra;
+		}
+	}
+	const int row1Ip = row1Widths[0];
+	const int row1Country = row1Widths[1];
+	const int row1City = row1Widths[2];
+	const int row1Asn = row1Widths[3];
 	const int row1CountryX = firstX + row1Ip + gap;
 	const int row1CityX = row1CountryX + row1Country + gap;
+	const int row1AsnX = row1CityX + row1City + gap;
 
-	const int minimumAsn = std::max(scaled(GetSafeHwnd(), 90),
-		scaled(GetSafeHwnd(), 46 + 12) + controlTextWidth(this, IDC_STATIC_PUBLIC_ASN));
-	const int minimumIsp = scaled(GetSafeHwnd(), 100);
-	const int desiredHostname = scaled(GetSafeHwnd(), 84 + 12)
-		+ controlTextWidth(this, IDC_STATIC_PUBLIC_HOSTNAME);
-	const int hostnameMaximum = std::max(1, available - gap * 2 - minimumAsn - minimumIsp);
-	const int row2Hostname = std::min(hostnameMaximum,
-		std::max(available * 55 / 100, desiredHostname));
-	const int row2Remainder = std::max(2, available - row2Hostname - gap * 2);
-	const int row2Asn = std::min(minimumAsn, std::max(1, row2Remainder - minimumIsp));
-	const int row2Isp = std::max(1, row2Remainder - row2Asn);
-	const int row2AsnX = firstX + row2Hostname + gap;
-	const int row2IspX = row2AsnX + row2Asn + gap;
+	const int hostnameLabelWidth = scaled(GetSafeHwnd(), 84);
+	const int ispLabelWidth = scaled(GetSafeHwnd(), 42);
+	const int minimumIspWidth = ispLabelWidth + scaled(GetSafeHwnd(), 80);
+	const int hostnameMaximum = std::max(scaled(GetSafeHwnd(), 60),
+		available - gap - minimumIspWidth - hostnameLabelWidth);
+	const int hostnameValueWidth = std::clamp(
+		controlTextWidth(this, IDC_STATIC_PUBLIC_HOSTNAME) + scaled(GetSafeHwnd(), 12),
+		scaled(GetSafeHwnd(), 60), hostnameMaximum);
+	const int row2Hostname = hostnameLabelWidth + hostnameValueWidth;
+	const int row2IspX = firstX + row2Hostname + gap;
+	const int ispAvailable = std::max(1, available - row2Hostname - gap);
+	const int row2Isp = std::min(ispAvailable, ispLabelWidth + std::clamp(
+		controlTextWidth(this, IDC_STATIC_PUBLIC_ISP) + scaled(GetSafeHwnd(), 12),
+		scaled(GetSafeHwnd(), 80), scaled(GetSafeHwnd(), 260)));
 
 	moveControl(this, IDC_STATIC_PUBLIC_IP_LABEL, firstX, line1, scaled(GetSafeHwnd(), 28), textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_IP, firstX + scaled(GetSafeHwnd(), 30), line1,
@@ -587,14 +635,14 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 		scaled(GetSafeHwnd(), 50), textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_CITY, row1CityX + scaled(GetSafeHwnd(), 52), line1,
 		row1City - scaled(GetSafeHwnd(), 52), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_ASN_LABEL, row1AsnX, line1,
+		scaled(GetSafeHwnd(), 44), textHeight);
+	moveControl(this, IDC_STATIC_PUBLIC_ASN, row1AsnX + scaled(GetSafeHwnd(), 46), line1,
+		row1Asn - scaled(GetSafeHwnd(), 46), textHeight);
 
 	moveControl(this, IDC_STATIC_PUBLIC_HOSTNAME_LABEL, firstX, line2, scaled(GetSafeHwnd(), 82), textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_HOSTNAME, firstX + scaled(GetSafeHwnd(), 84), line2,
 		row2Hostname - scaled(GetSafeHwnd(), 84), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_ASN_LABEL, row2AsnX, line2,
-		scaled(GetSafeHwnd(), 44), textHeight);
-	moveControl(this, IDC_STATIC_PUBLIC_ASN, row2AsnX + scaled(GetSafeHwnd(), 46), line2,
-		row2Asn - scaled(GetSafeHwnd(), 46), textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_ISP_LABEL, row2IspX, line2,
 		scaled(GetSafeHwnd(), 40), textHeight);
 	moveControl(this, IDC_STATIC_PUBLIC_ISP, row2IspX + scaled(GetSafeHwnd(), 42), line2,
@@ -613,7 +661,9 @@ void WinMTRDialog::layoutControls(int clientWidth, int clientHeight)
 			clientHeight - statusHeight - listTop - gap);
 	}
 	if (::IsWindow(statusBar.GetSafeHwnd())) RepositionBars(AFX_IDW_CONTROLBAR_FIRST, AFX_IDW_CONTROLBAR_LAST, 0);
-	RedrawWindow(nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+	SetRedraw(TRUE);
+	RedrawWindow(nullptr, nullptr,
+		RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME | RDW_UPDATENOW);
 }
 
 CSize WinMTRDialog::minimumWindowSize()
@@ -734,6 +784,30 @@ void WinMTRDialog::OnPaint()
 	CRect rect;
 	GetClientRect(rect);
 	dc.DrawIcon((rect.Width() - width) / 2, (rect.Height() - height) / 2, icon);
+}
+
+BOOL WinMTRDialog::OnEraseBkgnd(CDC* dc)
+{
+	if (dc == nullptr) return CDialog::OnEraseBkgnd(dc);
+	CRect client;
+	GetClientRect(client);
+	dc->FillSolidRect(client, GetSysColor(COLOR_3DFACE));
+	return TRUE;
+}
+
+HBRUSH WinMTRDialog::OnCtlColor(CDC* dc, CWnd* window, UINT controlType)
+{
+	HBRUSH brush = CDialog::OnCtlColor(dc, window, controlType);
+	const int id = window == nullptr ? 0 : window->GetDlgCtrlID();
+	const bool isGroupBox = id == IDC_GROUP_TARGET || id == IDC_GROUP_ACTIONS
+		|| id == IDC_GROUP_PUBLIC_INFO;
+	if (controlType == CTLCOLOR_STATIC || (controlType == CTLCOLOR_BTN && isGroupBox)) {
+		const COLORREF background = GetSysColor(COLOR_3DFACE);
+		dc->SetBkMode(OPAQUE);
+		dc->SetBkColor(background);
+		brush = GetSysColorBrush(COLOR_3DFACE);
+	}
+	return brush;
 }
 
 HCURSOR WinMTRDialog::OnQueryDragIcon()
@@ -954,7 +1028,6 @@ void WinMTRDialog::adjustWindowForRows()
 	lastAutoRowCount = displayRows.size();
 	CRect client;
 	GetClientRect(client);
-	layoutControls(client.Width(), client.Height());
 	const int remaining = client.Width() - margin * 2 - columnsWidth;
 	if (remaining > 0) listMtr.SetColumnWidth(13, listMtr.GetColumnWidth(13) + remaining);
 }
@@ -1083,8 +1156,7 @@ void WinMTRDialog::updateNetworkInfoSummary()
 	SetDlgItemTextW(IDC_STATIC_PUBLIC_ISP,
 		address.isp.empty() ? unavailable.GetString() : address.isp.c_str());
 	buttonNetworkDetails.EnableWindow(value.complete && value.anyAvailable());
-	// Re-evaluate the second-row split after the real hostname arrives so it can
-	// borrow any space that ISP does not need to keep guaranteed.
+	// Re-size all public-information fields after the real values arrive.
 	CRect client;
 	GetClientRect(client);
 	layoutControls(client.Width(), client.Height());
