@@ -1,4 +1,5 @@
 #include "WinMTRProbeScheduler.h"
+#include "WinMTRProbeParameters.h"
 #include "WinMTRAddressPolicy.h"
 #include "WinMTRJson.h"
 #include "WinMTRSerialization.h"
@@ -441,6 +442,35 @@ void test_route_policy_scripted_changes()
 		"minimum TTL was not enforced after an early destination");
 }
 
+void test_probe_packet_parameters()
+{
+	using winmtr::probe_parameters::make_payload;
+	using winmtr::probe_parameters::make_wire_options;
+	std::uint64_t fixedState = 123;
+	require(make_payload(0, 32, fixedState).empty(), "zero-byte payload was not supported");
+	const auto maximum = make_payload(4'096, 0xab, fixedState);
+	require(maximum.size() == 4'096
+		&& std::ranges::all_of(maximum, [](std::byte value) { return value == std::byte{ 0xab }; }),
+		"fixed maximum-size payload did not preserve its pattern");
+
+	std::uint64_t firstState = 0x123456789abcdef0ull;
+	std::uint64_t secondState = firstState;
+	const auto randomFirst = make_payload(64, -1, firstState);
+	const auto randomSecond = make_payload(64, -1, secondState);
+	require(randomFirst == randomSecond && firstState == secondState,
+		"random payload was not reproducible from its seed");
+	require(std::ranges::any_of(randomFirst,
+		[head = randomFirst.front()](std::byte value) { return value != head; }),
+		"random payload did not vary its bytes");
+
+	const auto ipv4 = make_wire_options(64, 255, true, true);
+	require(ipv4.ttl == 64 && ipv4.tos == 255 && ipv4.dont_fragment,
+		"IPv4 TTL/ToS/DF parameters changed");
+	const auto ipv6 = make_wire_options(64, 255, true, false);
+	require(ipv6.ttl == 64 && ipv6.tos == 255 && !ipv6.dont_fragment,
+		"IPv4-only DF flag leaked into IPv6");
+}
+
 void fuzz_json_parser_offline()
 {
 	std::uint64_t state = 0x243f6a8885a308d3ull;
@@ -477,6 +507,7 @@ int main()
 		test_grace_cancellation_is_not_loss();
 		test_deterministic_scheduler_resource_budget();
 		test_route_policy_scripted_changes();
+		test_probe_packet_parameters();
 		fuzz_json_parser_offline();
 		std::cout << "All probe scheduler tests passed.\n";
 		return 0;

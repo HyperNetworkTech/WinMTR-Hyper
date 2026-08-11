@@ -13,6 +13,7 @@ module;
 #pragma warning (disable : 4005)
 #include "targetver.h"
 #include "WinMTRRoutePolicy.h"
+#include "WinMTRProbeParameters.h"
 #define WIN32_LEAN_AND_MEAN
 #define VC_EXTRALEAN
 #define NOMCX
@@ -167,27 +168,6 @@ struct parsed_reply final {
 	return reply_header + sizeof(IO_STATUS_BLOCK) + request_size + 8u;
 }
 
-[[nodiscard]] std::vector<std::byte> make_payload(const WinMTRTraceOptions& options,
-	std::uint64_t& random_state)
-{
-	std::vector<std::byte> payload(options.packet_size);
-	if (options.payload_pattern >= 0) {
-		std::fill(payload.begin(), payload.end(),
-			static_cast<std::byte>(options.payload_pattern));
-		return payload;
-	}
-
-	// Small xorshift generator: no runtime dependency and random mode changes
-	// every byte without claiming cryptographic randomness.
-	for (auto& value : payload) {
-		random_state ^= random_state << 13u;
-		random_state ^= random_state >> 7u;
-		random_state ^= random_state << 17u;
-		value = static_cast<std::byte>(random_state & 0xffu);
-	}
-	return payload;
-}
-
 [[nodiscard]] unique_icmp_handle create_icmp_handle(ADDRESS_FAMILY family) noexcept
 {
 	if (family == AF_INET) {
@@ -209,11 +189,12 @@ void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 	}
 
 	probe.reply_buffer.resize(reply_buffer_size(destination.si_family, payload.size()));
-	probe.ip_options.Ttl = static_cast<UCHAR>(probe.ttl);
-	probe.ip_options.Tos = static_cast<UCHAR>(options.tos);
-	probe.ip_options.Flags = destination.si_family == AF_INET && options.dont_fragment
-		? IP_FLAG_DF
-		: 0;
+	const auto wire_options = winmtr::probe_parameters::make_wire_options(
+		probe.ttl, options.tos, options.dont_fragment,
+		destination.si_family == AF_INET);
+	probe.ip_options.Ttl = wire_options.ttl;
+	probe.ip_options.Tos = wire_options.tos;
+	probe.ip_options.Flags = wire_options.dont_fragment ? IP_FLAG_DF : 0;
 
 	DWORD result = 0;
 	SetLastError(ERROR_SUCCESS);
@@ -321,7 +302,8 @@ void issue_probe(pending_probe& probe, HANDLE icmp_handle,
 		probe.ttl = 1;
 		std::uint64_t random_state = GetTickCount64()
 			^ static_cast<std::uint64_t>(candidate.si_family);
-		const auto payload = make_payload(options, random_state);
+		const auto payload = winmtr::probe_parameters::make_payload(
+			options.packet_size, options.payload_pattern, random_state);
 		issue_probe(probe, handle.get(), candidate, options, payload, timeout_ms);
 		if (stop_token.stop_requested()) return false;
 		const auto parsed = parse_reply(probe, candidate.si_family);
@@ -845,7 +827,8 @@ WinMTRTraceResult WinMTRNet::DoTrace(std::stop_token stop_token, SOCKADDR_INET a
 					request->icmp_handle = create_icmp_handle(address.si_family);
 					request->destination = address;
 					request->options = trace_options;
-					request->payload = make_payload(trace_options, random_state);
+					request->payload = winmtr::probe_parameters::make_payload(
+						trace_options.packet_size, trace_options.payload_pattern, random_state);
 					request->timeout_ms = trace_options.timeout_ms;
 					request->completions = &completions;
 					if (!request->icmp_handle) {
