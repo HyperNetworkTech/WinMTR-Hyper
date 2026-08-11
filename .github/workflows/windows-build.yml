@@ -1,0 +1,47 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: x64 ${{ matrix.configuration }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        configuration:
+          - Debug
+          - Release
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v4
+
+      - name: Configure
+        run: >-
+          cmake -S . -B "out/build/${{ matrix.configuration }}"
+          -G "Visual Studio 17 2022" -A x64
+          -DBUILD_TESTING=ON
+
+      - name: Build
+        run: >-
+          cmake --build "out/build/${{ matrix.configuration }}"
+          --config "${{ matrix.configuration }}" --parallel
+
+      - name: Test
+        run: >-
+          ctest --test-dir "out/build/${{ matrix.configuration }}"
+          -C "${{ matrix.configuration }}" --output-on-failure
