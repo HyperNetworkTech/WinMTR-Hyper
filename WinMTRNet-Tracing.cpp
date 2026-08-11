@@ -594,6 +594,11 @@ void WinMTRNet::commitTimeout(unsigned ttl, std::uint64_t expected_epoch) noexce
 		return;
 	}
 	host[ttl - 1].noteTimeout();
+	// Make this completed probe visible immediately. During the first round the
+	// snapshot getter still limits the table to the contiguous completed prefix,
+	// so a faster high-TTL timeout cannot expose unfinished hops as packet loss.
+	display_max_ttl = std::max(display_max_ttl,
+		std::clamp(ttl, session_start_ttl, session_options.max_hops));
 	++data_revision;
 }
 
@@ -615,6 +620,8 @@ void WinMTRNet::commitReply(unsigned ttl, const SOCKADDR_INET& responder,
 		}
 		auto& hop = host[ttl - 1];
 		hop.noteReply(round_trip_ms, cycle, tick);
+		display_max_ttl = std::max(display_max_ttl,
+			std::clamp(ttl, session_start_ttl, session_options.max_hops));
 		if (is_destination) hop.last_destination_reply_tick = tick;
 		auto& observed = hop.observeResponder(responder, ++reply_sequence, tick);
 		const auto address_key = addr_to_string(responder);
